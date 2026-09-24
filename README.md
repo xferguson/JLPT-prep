@@ -162,8 +162,9 @@ data/n5/        generated course data
 scripts/        data build pipeline, grammar source, icon renderer
 ```
 
-When you change any shipped file, bump `VERSION` in `sw.js` so installed
-copies pick up the update.
+The service worker fetches from the network first and falls back to its cache
+when offline, so a new deploy shows up on the next load. Bump `VERSION` in
+`sw.js` when you add or remove shipped files.
 
 Progress is stored under the `localStorage` key `jlpt-prep:N5`, and the data
 lives in `data/<level>/`. Adding N4 and higher later means building another

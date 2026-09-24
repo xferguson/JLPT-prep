@@ -1,6 +1,6 @@
-// Offline-first service worker: precache the app shell and the N5 data, serve
-// from cache, refresh in the background. Bump VERSION when files change.
-const VERSION = 'v2';
+// Service worker: precache the app shell and the N5 data so the app works
+// offline. Bump VERSION when the list of files changes.
+const VERSION = 'v3';
 const CACHE = `jlpt-prep-${VERSION}`;
 const ASSETS = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
@@ -22,17 +22,26 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+// Network first (so a new deploy shows up on the next load), falling back to
+// the cache when offline or when the network is slow.
+const NETWORK_TIMEOUT_MS = 3000;
+
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
-  event.respondWith(
-    caches.open(CACHE).then(async (cache) => {
-      const cached = await cache.match(req, { ignoreSearch: true });
-      const network = fetch(req).then((res) => {
-        if (res.ok) cache.put(req, res.clone());
-        return res;
-      }).catch(() => cached);
-      return cached || network;
-    }),
-  );
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const network = fetch(req).then((res) => {
+      if (res.ok) cache.put(req, res.clone());
+      return res;
+    });
+    network.catch(() => {}); // a late failure after the timeout is not an error
+    const timeout = new Promise((resolve) => setTimeout(resolve, NETWORK_TIMEOUT_MS));
+    try {
+      const res = await Promise.race([network, timeout]);
+      if (res) return res;
+    } catch { /* offline: fall through to the cache */ }
+    const cached = await cache.match(req, { ignoreSearch: true });
+    return cached || network;
+  })());
 });

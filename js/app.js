@@ -42,13 +42,18 @@ async function boot() {
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
-  window.addEventListener('hashchange', route);
+  window.addEventListener('hashchange', () => route());
   document.addEventListener('keydown', (e) => {
     if (e.target.matches('input, textarea, select') && e.key !== 'Enter') return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (keyHandler && keyHandler(e) !== false) { /* handled */ }
   });
-  setInterval(updateBadge, 30_000);
+  // Keep time-dependent screens current: cards become due while the app sits
+  // open, and an installed PWA is resumed rather than reloaded.
+  setInterval(() => refreshIfIdle(false), 30_000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshIfIdle(true); });
+  window.addEventListener('pageshow', (e) => { if (e.persisted) refreshIfIdle(true); });
+  window.addEventListener('focus', () => refreshIfIdle(false));
   route();
 }
 
@@ -73,7 +78,39 @@ function toast(html, ms = 3500) {
   toastTimer = setTimeout(() => { t.hidden = true; }, ms);
 }
 
-function route() {
+let lastSignature = '';
+
+// Screens that only display state (no card or form in progress) and can be
+// redrawn at any time.
+function idleScreen() {
+  const tab = location.hash.replace(/^#\/?/, '').split('/')[0] || 'home';
+  if (tab === 'home' || tab === 'stats') return tab;
+  if (tab === 'review' && !app.querySelector('.card')) return tab;
+  return null;
+}
+
+// What an idle screen shows that changes with time alone.
+function screenSignature(tab) {
+  const due = dueCards(state).length;
+  const day = new Date().toDateString();
+  return tab === 'stats' ? `${tab}|${due}|${day}` : `${tab}|${due}|${day}|${whenText(nextDueTime(state))}`;
+}
+
+function refreshIfIdle(resumed) {
+  updateBadge();
+  const tab = idleScreen();
+  if (!tab) return;
+  if (resumed) {
+    // pick up progress saved by another tab/window while we were away
+    const saved = loadState(LEVEL);
+    if (saved) state = reconcile(course, saved);
+  }
+  const sig = screenSignature(tab);
+  if (!resumed && sig === lastSignature) return;
+  route({ keepScroll: true });
+}
+
+function route({ keepScroll = false } = {}) {
   keyHandler = null;
   hideTip();
   const hash = location.hash.replace(/^#\/?/, '');
@@ -87,7 +124,8 @@ function route() {
   });
   if (tab !== 'learn') learn = null;
   if (tab !== 'review') reviewRun = null;
-  window.scrollTo(0, 0);
+  if (!keepScroll) window.scrollTo(0, 0);
+  if (['home', 'stats', 'review'].includes(tab)) setTimeout(() => { lastSignature = idleScreen() ? screenSignature(tab) : ''; });
   switch (tab) {
     case 'learn': return renderLearn();
     case 'review': return renderReview();
@@ -829,7 +867,7 @@ function drawStatsCharts({ n, fc }) {
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => { if (location.hash.startsWith('#/stats')) renderStats(); }, 200);
+  resizeTimer = setTimeout(() => { if (location.hash.startsWith('#/stats')) route({ keepScroll: true }); }, 200);
 });
 
 // ------------------------------------------------------------------ settings
