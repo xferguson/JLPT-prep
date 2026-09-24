@@ -1,0 +1,12 @@
+{
+  "name": "jlpt-prep",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline-first PWA for JLPT N5 study: frequency-ordered characters, SRS flashcards, and cloze sentences.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "start": "python3 -m http.server 8080",
+    "build-data": "python3 scripts/build_data.py"
+  }
+}

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>JLPT Prep · N5</title>
+  <meta name="description" content="Learn the Japanese for JLPT N5: kana, kanji, vocabulary and sentences with spaced repetition. Works offline.">
+  <meta name="theme-color" content="#be1e2d">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/"><span class="brand-mark" lang="ja">日</span> JLPT Prep <span class="level-chip">N5</span></a>
+  </header>
+  <main id="app" aria-live="polite">
+    <p class="loading">Loading…</p>
+  </main>
+  <nav class="tabbar" aria-label="Main">
+    <a href="#/" data-tab="home"><span class="ico" aria-hidden="true">⌂</span>Home</a>
+    <a href="#/learn" data-tab="learn"><span class="ico" aria-hidden="true">＋</span>Learn</a>
+    <a href="#/review" data-tab="review"><span class="ico" aria-hidden="true">↻</span>Review<span class="badge" id="due-badge" hidden></span></a>
+    <a href="#/browse/characters" data-tab="browse"><span class="ico" aria-hidden="true">≡</span>Browse</a>
+    <a href="#/settings" data-tab="settings"><span class="ico" aria-hidden="true">⚙</span>Settings</a>
+  </nav>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
