@@ -60,6 +60,7 @@ async function boot() {
 function persist() {
   if (!saveState(state)) toast('Could not save progress — storage may be full.');
   updateBadge();
+  scheduleDueWakeup();
 }
 
 function updateBadge() {
@@ -96,8 +97,21 @@ function screenSignature(tab) {
   return tab === 'stats' ? `${tab}|${due}|${day}` : `${tab}|${due}|${day}|${whenText(nextDueTime(state))}`;
 }
 
+// Wake up exactly when the next card comes due (the 30s ticker is a fallback).
+let dueTimer;
+function scheduleDueWakeup() {
+  clearTimeout(dueTimer);
+  const next = nextDueTime(state);
+  if (!Number.isFinite(next)) return;
+  const wait = next - Date.now();
+  // wake when it comes due, or when "in N minutes" would drop under a minute
+  const until = wait > 60_000 ? Math.min(wait - 60_000, 30_000) : wait;
+  if (until > 0) dueTimer = setTimeout(() => refreshIfIdle(false), until + 250);
+}
+
 function refreshIfIdle(resumed) {
   updateBadge();
+  scheduleDueWakeup();
   const tab = idleScreen();
   if (!tab) return;
   if (resumed) {
@@ -153,7 +167,9 @@ function bar(parts, total) {
 function whenText(ms) {
   if (!Number.isFinite(ms)) return '';
   const d = ms - Date.now();
-  return d <= 0 ? 'now' : `in ${formatInterval(d)}`;
+  if (d <= 0) return 'now';
+  if (d < 60_000) return 'in under a minute';
+  return `in ${formatInterval(d)}`;
 }
 
 function renderHome() {
