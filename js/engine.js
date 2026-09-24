@@ -2,13 +2,16 @@
 // Pure functions over (course, state) so it can be unit-tested in Node.
 //
 // Flow
-//  * Every character (kana + N5 kanji) starts in the queue, most frequent first.
+//  * The queue starts with the N5 kanji and every word that needs no N5 kanji
+//    (kana words, or words whose kanji are beyond N5), interleaved so both run
+//    from most to least frequent. Kana have no cards of their own: they are
+//    learned through words (romaji -> kana stages).
 //  * Learning an item (a Memrise-style session) moves it into the SRS.
 //  * Reviews test one form per review, progressing through the item's stages
 //    (kana: kana; kanji & words: romaji -> kana -> kanji).
-//  * When a character passes its first review on its final stage (kanji for
-//    kanji, kana for kana) it is "known". Every word whose characters are all
-//    known is inserted at the FRONT of the queue (most frequent first).
+//  * When a kanji passes its first review on its kanji stage it is "known".
+//    Every word whose kanji are all known is inserted at the FRONT of the
+//    queue (most frequent first).
 //  * When a word passes its first review on its final stage, its 3-5 practice
 //    sentences are inserted at the front of the queue as cloze cards.
 
@@ -26,7 +29,7 @@ export const DEFAULT_SETTINGS = {
 
 export const STAGE_LABELS = { romaji: 'Romaji', kana: 'Kana', kanji: 'Kanji', cloze: 'Cloze' };
 
-export function buildCourse({ characters, words, sentences, grammar = [], meta = {} }) {
+export function buildCourse({ characters, words, sentences, grammar = [], kana = [], meta = {} }) {
   const items = new Map();
   const charByValue = new Map();
   for (const c of characters) {
@@ -51,7 +54,7 @@ export function buildCourse({ characters, words, sentences, grammar = [], meta =
   }
   const grammarById = new Map(grammar.map((g) => [g.id, g]));
   return {
-    meta, items, characters, words, sentences, grammar,
+    meta, items, characters, words, sentences, grammar, kana,
     charByValue, sentenceById, clozesByWord, grammarById,
   };
 }
@@ -61,14 +64,29 @@ export function dayKey(now) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// Kanji plus the words that need no kanji, merged so each list keeps its own
+// frequency order and they are spread evenly through each other.
+export function startingItems(course) {
+  const kanji = [...course.characters].sort((a, b) => a.rank - b.rank);
+  const free = course.words.filter((w) => w.req.length === 0).sort((a, b) => a.rank - b.rank);
+  const pos = (i, n) => (i + 0.5) / n;
+  return [
+    ...kanji.map((c, i) => [pos(i, kanji.length), 0, c.id]),
+    ...free.map((w, i) => [pos(i, free.length), 1, w.id]),
+  ].sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]);
+}
+
 export function initialState(course, now = Date.now()) {
+  const queue = startingItems(course);
+  const unlocked = {}; // id -> timestamp when a word / cloze entered the queue
+  for (const id of queue) if (id.startsWith('w:')) unlocked[id] = now;
   return {
-    version: 1,
+    version: 2,
     level: course.meta.level || 'N5',
     createdAt: now,
     cards: {},
-    queue: [...course.characters].sort((a, b) => a.rank - b.rank).map((c) => c.id),
-    unlocked: {}, // id -> timestamp when a word / cloze entered the queue
+    queue,
+    unlocked,
     days: {},
     settings: { ...DEFAULT_SETTINGS },
   };
@@ -85,7 +103,14 @@ function srsConfig(state) {
 function today(state, now) {
   const k = dayKey(now);
   if (!state.days[k]) state.days[k] = { learned: 0, reviews: 0, again: 0 };
-  return state.days[k];
+  const d = state.days[k];
+  // detailed counters used by the Stats view
+  d.learnedBy ||= {};
+  d.mastered ||= {};
+  d.by ||= {}; // "kind:stage" -> [passed, failed]
+  d.mat ||= {}; // learning | young | mature -> [passed, failed]
+  d.ratings ||= [0, 0, 0, 0];
+  return d;
 }
 
 export function stats(course, state, now = Date.now()) {
@@ -145,7 +170,12 @@ export function completeLearning(course, state, ids, now = Date.now()) {
     state.cards[id] = introduce(newCard(id), now, cfg);
   }
   state.queue = state.queue.filter((id) => !done.has(id));
-  today(state, now).learned += ids.length;
+  const t = today(state, now);
+  t.learned += ids.length;
+  for (const id of ids) {
+    const kind = course.items.get(id)?.kind;
+    if (kind) t.learnedBy[kind] = (t.learnedBy[kind] || 0) + 1;
+  }
   return state;
 }
 
@@ -215,11 +245,21 @@ function enqueueFront(state, ids, now) {
 export function review(course, state, id, rating, now = Date.now()) {
   const item = course.items.get(id);
   const prev = state.cards[id];
+  const stage = stageOf(course, prev);
   const res = srsAnswer(prev, rating, now, item.stages.length, srsConfig(state));
   state.cards[id] = res.card;
   const t = today(state, now);
   t.reviews++;
-  if (rating === 1) t.again++;
+  const failed = rating === 1 ? 1 : 0;
+  if (failed) t.again++;
+  const tally = (obj, key) => {
+    obj[key] ||= [0, 0];
+    obj[key][failed]++;
+  };
+  tally(t.by, `${item.kind}:${stage}`);
+  tally(t.mat, maturity(prev));
+  t.ratings[rating - 1]++;
+  if (res.passedFinalFirst) t.mastered[item.kind] = (t.mastered[item.kind] || 0) + 1;
   let unlocked = [];
   if (res.passedFinalFirst) {
     if (item.kind === 'char') unlocked = unlockWords(course, state, now);
@@ -228,15 +268,25 @@ export function review(course, state, id, rating, now = Date.now()) {
   return { ...res, unlocked };
 }
 
+// Anki's maturity buckets: still in learning steps, young (< 21d), mature.
+export function maturity(card) {
+  if (card.state !== 'review') return 'learning';
+  return card.ivl >= 21 ? 'mature' : 'young';
+}
+
 // Brings a restored/imported state in line with the course (new data, settings).
 export function reconcile(course, state, now = Date.now()) {
   state.settings = { ...DEFAULT_SETTINGS, ...state.settings };
+  state.unlocked ||= {};
+  state.days ||= {};
   state.cards = Object.fromEntries(Object.entries(state.cards).filter(([id]) => course.items.has(id)));
   state.queue = state.queue.filter((id) => course.items.has(id) && !state.cards[id]);
   const queued = new Set(state.queue);
-  for (const c of course.characters) {
-    if (!state.cards[c.id] && !queued.has(c.id)) state.queue.push(c.id);
+  for (const id of startingItems(course)) {
+    if (id.startsWith('w:')) state.unlocked[id] ||= now;
+    if (!state.cards[id] && !queued.has(id)) state.queue.push(id);
   }
+  state.version = 2;
   unlockWords(course, state, now);
   for (const w of course.words) if (state.cards[w.id]?.passedFinal) unlockSentences(course, state, w.id, now);
   return state;

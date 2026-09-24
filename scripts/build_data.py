@@ -257,13 +257,22 @@ def main():
             'romaji': ', '.join(to_romaji(r) for r in readings),
             'strokes': k['strokes'], 'count': char_count[c],
         })
-    characters.sort(key=lambda x: (-x['count'], x['type'] != 'hiragana', x['char']))
-    for i, ch in enumerate(characters):
-        ch['rank'] = i + 1
-        ch['freq'] = round(ch['count'] / total_chars * 1e6, 1)  # per million chars
+    # Kana are a reference chart only (learned through words); kanji are cards.
+    for group in ('kana', 'kanji'):
+        members = [c for c in characters if (c['type'] == 'kanji') == (group == 'kanji')]
+        members.sort(key=lambda x: (-x['count'], x['type'] != 'hiragana', x['char']))
+        for i, ch in enumerate(members):
+            ch['rank'] = i + 1
+            ch['freq'] = round(ch['count'] / total_chars * 1e6, 1)  # per million chars
+    for ch in characters:
         del ch['count']
+    kana_chart = sorted([c for c in characters if c['type'] != 'kanji'], key=lambda c: c['rank'])
+    for c in kana_chart:
+        del c['kind'], c['id']
+    characters = sorted([c for c in characters if c['type'] == 'kanji'], key=lambda c: c['rank'])
+    for ch in characters:
         # stages the card moves through as it is reviewed
-        ch['stages'] = ['romaji', 'kana', 'kanji'] if ch['type'] == 'kanji' else ['kana']
+        ch['stages'] = ['romaji', 'kana', 'kanji']
 
     char_ids = {c['char'] for c in characters}
 
@@ -294,10 +303,10 @@ def main():
             stages = ['romaji', 'kana', 'kanji']
         else:
             stages = ['romaji', 'kana']
-        # characters that must be known before the word is unlocked
+        # kanji that must be known before the word is unlocked (none for kana words)
         req = []
-        for c in kana + (written if 'kanji' in stages else ''):
-            if (is_kana(c) or is_kanji(c)) and c in char_ids and c not in req:
+        for c in (written if 'kanji' in stages else ''):
+            if c in char_ids and c not in req:
                 req.append(c)
         display = row['expression'].split(';')[0].strip().replace('〜', '～')
         entry = {
@@ -545,12 +554,13 @@ def main():
         print('wrote', name, os.path.getsize(os.path.join(OUT, name)) // 1024, 'KB')
 
     dump('characters.json', characters)
+    dump('kana.json', kana_chart)
     dump('words.json', words)
     dump('sentences.json', sorted(sentences.values(), key=lambda s: int(s['id'][2:])))
     dump('grammar.json', grammar)
     dump('meta.json', {
         'level': 'N5', 'version': jm.get('dictDate', ''),
-        'counts': {'characters': len(characters), 'kanji': len(n5_kanji), 'words': len(words),
+        'counts': {'characters': len(characters), 'kana': len(kana_chart), 'kanji': len(n5_kanji), 'words': len(words),
                    'sentences': len(sentences), 'grammar': len(grammar)},
         'sources': [
             {'name': 'JLPT N5 vocabulary (open-anki-jlpt-decks)', 'license': 'MIT',

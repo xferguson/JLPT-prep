@@ -17,17 +17,18 @@ const realCourse = () => buildCourse({
 
 // A tiny hand-made course so the flow is easy to follow.
 function tinyCourse() {
-  const characters = [
-    { id: 'c:の', kind: 'char', type: 'hiragana', char: 'の', romaji: 'no', rank: 1, stages: ['kana'] },
-    { id: 'c:は', kind: 'char', type: 'hiragana', char: 'は', romaji: 'ha', rank: 2, stages: ['kana'] },
-    { id: 'c:な', kind: 'char', type: 'hiragana', char: 'な', romaji: 'na', rank: 3, stages: ['kana'] },
-    { id: 'c:日', kind: 'char', type: 'kanji', char: '日', romaji: 'nichi', kana: 'にち', meanings: ['day'], rank: 4, stages: ['romaji', 'kana', 'kanji'] },
-  ];
+  const kanji = (ch, rank, meaning) => ({ id: `c:${ch}`, kind: 'char', type: 'kanji', char: ch, romaji: 'x', kana: 'x', meanings: [meaning], rank, stages: ['romaji', 'kana', 'kanji'] });
+  const characters = [kanji('日', 1, 'day'), kanji('本', 2, 'book'), kanji('人', 3, 'person')];
+  const word = (id, written, kana, req, rank, sentences = []) => ({
+    id, kind: 'word', written, kana, meaning: written, req, rank, sentences,
+    stages: req.length ? ['romaji', 'kana', 'kanji'] : ['romaji', 'kana'],
+  });
   const words = [
-    { id: 'w:1', kind: 'word', written: 'はな', kana: 'はな', meaning: 'flower', req: ['は', 'な'], rank: 2, stages: ['romaji', 'kana'], sentences: [{ s: 's:1', a: [0, 2], r: 'はな' }, { s: 's:2', a: [3, 5], r: 'はな' }] },
-    { id: 'w:2', kind: 'word', written: 'の', kana: 'の', meaning: 'of', req: ['の'], rank: 1, stages: ['romaji', 'kana'], sentences: [] },
-    { id: 'w:3', kind: 'word', written: '日', kana: 'ひ', meaning: 'sun', req: ['ひ', '日'], rank: 3, stages: ['romaji', 'kana', 'kanji'], sentences: [] },
-    { id: 'w:4', kind: 'word', written: 'はは', kana: 'はは', meaning: 'mother', req: ['は'], rank: 4, stages: ['romaji', 'kana'], sentences: [] },
+    word('w:1', 'はな', 'はな', [], 1, [{ s: 's:1', a: [0, 2], r: 'はな' }, { s: 's:2', a: [5, 7], r: 'はな' }]),
+    word('w:2', 'の', 'の', [], 2),
+    word('w:3', '日本', 'にほん', ['日', '本'], 3),
+    word('w:4', '日', 'ひ', ['日'], 4),
+    word('w:5', '人', 'ひと', ['人'], 5),
   ];
   const sentences = [
     { id: 's:1', ja: 'はなです。', en: "It's a flower.", t: [['はな'], ['です'], ['。']], g: [] },
@@ -46,14 +47,24 @@ function master(course, state, id, now) {
   return t;
 }
 
-test('characters start in the queue in frequency order', () => {
+test('queue starts with kanji and kana-only words, interleaved by frequency', () => {
   const course = realCourse();
   const state = initialState(course, 0);
-  const ranks = state.queue.map((id) => course.items.get(id).rank);
-  assert.deepEqual(ranks, [...ranks].sort((a, b) => a - b));
-  assert.equal(state.queue.length, course.characters.length);
-  // no words or sentences until characters are known
-  assert.ok(state.queue.every((id) => id.startsWith('c:')));
+  assert.ok(course.characters.every((c) => c.type === 'kanji'), 'kana have no cards');
+  const kanji = state.queue.filter((id) => id.startsWith('c:'));
+  const words = state.queue.filter((id) => id.startsWith('w:'));
+  assert.equal(kanji.length, course.characters.length);
+  assert.equal(words.length, course.words.filter((w) => w.req.length === 0).length);
+  // each list keeps its own frequency order
+  for (const list of [kanji, words]) {
+    const ranks = list.map((id) => course.items.get(id).rank);
+    assert.deepEqual(ranks, [...ranks].sort((a, b) => a - b));
+  }
+  // and they are spread through each other (a kanji within the first 10 items)
+  assert.ok(state.queue.slice(0, 10).some((id) => id.startsWith('c:')));
+  assert.ok(state.queue.slice(0, 10).some((id) => id.startsWith('w:')));
+  // words that need N5 kanji are locked
+  assert.ok(course.words.filter((w) => w.req.length).every((w) => !state.queue.includes(w.id)));
 });
 
 test('SRS: learning steps, graduation, stage progression', () => {
@@ -91,29 +102,21 @@ test('SRS: learning steps, graduation, stage progression', () => {
   assert.equal(e.card.ivl, 4);
 });
 
-test('knowing characters unlocks words at the front of the queue, by frequency', () => {
+test('knowing a kanji unlocks its words at the front of the queue, by frequency', () => {
   const course = tinyCourse();
-  let now = 0;
-  const state = initialState(course, now);
-  state.settings.batchSize = 3;
-  const batch = nextNewItems(course, state, now).map((i) => i.id);
-  assert.deepEqual(batch, ['c:の', 'c:は', 'c:な']);
-  completeLearning(course, state, batch, now);
-  assert.deepEqual(state.queue, ['c:日']);
-
-  now = 10 * MINUTE;
-  // は passes its (only, kana) stage: はは unlocks; はな still needs な
-  let r = review(course, state, 'c:は', GOOD, now);
-  assert.ok(r.passedFinalFirst);
-  assert.deepEqual(r.unlocked, ['w:4']);
-  r = review(course, state, 'c:の', GOOD, now);
-  assert.deepEqual(r.unlocked, ['w:2']);
-  r = review(course, state, 'c:な', GOOD, now);
-  assert.deepEqual(r.unlocked, ['w:1']);
-  // newest unlocks go first; the remaining character comes after the words
-  assert.deepEqual(state.queue, ['w:1', 'w:2', 'w:4', 'c:日']);
-  // 日 alone does not unlock 日 (ひ) because ひ is not known
-  assert.equal(state.unlocked['w:3'], undefined);
+  const state = initialState(course, 0);
+  assert.deepEqual(state.queue, ['c:日', 'w:1', 'c:本', 'w:2', 'c:人']);
+  completeLearning(course, state, ['c:日', 'c:本'], 0);
+  master(course, state, 'c:本', 10 * 60000);
+  assert.equal(state.unlocked['w:3'], undefined); // 日本 still needs 日
+  let t = 10 * 60000;
+  let unlocked = [];
+  for (let i = 0; i < 5 && !state.cards['c:日'].passedFinal; i++) {
+    t = Math.max(t, state.cards['c:日'].due);
+    unlocked = review(course, state, 'c:日', GOOD, t).unlocked;
+  }
+  assert.deepEqual(unlocked, ['w:3', 'w:4']); // 日本 then 日, by frequency
+  assert.deepEqual(state.queue, ['w:3', 'w:4', 'w:1', 'w:2', 'c:人']);
 });
 
 test('a kanji only counts once it passes a review on its kanji stage', () => {
@@ -136,9 +139,6 @@ test('a kanji only counts once it passes a review on its kanji stage', () => {
 test('learning a word queues its sentences as cloze cards', () => {
   const course = tinyCourse();
   const state = initialState(course, 0);
-  completeLearning(course, state, ['c:は', 'c:な'], 0);
-  review(course, state, 'c:は', GOOD, 10 * MINUTE);
-  review(course, state, 'c:な', GOOD, 10 * MINUTE);
   completeLearning(course, state, ['w:1'], 20 * MINUTE);
   const t = master(course, state, 'w:1', 30 * MINUTE);
   assert.ok(state.cards['w:1'].passedFinal);
@@ -155,11 +155,12 @@ test('daily new-item limit', () => {
   state.settings.newPerDay = 7;
   state.settings.batchSize = 5;
   completeLearning(course, state, nextNewItems(course, state, 0).map((i) => i.id), 0);
+  assert.equal(state.days[Object.keys(state.days)[0]].learned, 5);
   assert.equal(nextNewItems(course, state, 0).length, 2);
   assert.equal(nextNewItems(course, state, 0, { ignoreLimit: true }).length, 5);
 });
 
-test('full real-data run: learning every character unlocks words and sentences', () => {
+test('full real-data run: learning every kanji unlocks every word', () => {
   const course = realCourse();
   const state = initialState(course, 0);
   let now = 0;
@@ -167,10 +168,7 @@ test('full real-data run: learning every character unlocks words and sentences',
   completeLearning(course, state, allChars, now);
   for (const id of allChars) now = master(course, state, id, now);
   const words = state.queue.filter((id) => id.startsWith('w:'));
-  assert.ok(words.length > 600, `unlocked ${words.length} words`);
-  // words are in frequency order
-  const ranks = words.map((id) => course.items.get(id).rank);
-  assert.ok(ranks.length > 0);
+  assert.equal(words.length, course.words.length);
   const w = course.words.find((x) => x.sentences.length >= 3 && state.queue.includes(x.id));
   completeLearning(course, state, [w.id], now);
   master(course, state, w.id, now);
@@ -183,14 +181,16 @@ test('reconcile restores queue invariants', () => {
   const state = initialState(course, 0);
   state.queue = [];
   state.cards['bogus'] = newCard('bogus');
+  state.cards['c:の'] = newCard('c:の'); // kana card from an older version
   reconcile(course, state, 0);
   assert.equal(state.cards.bogus, undefined);
-  assert.equal(state.queue.length, 4);
+  assert.equal(state.cards['c:の'], undefined);
+  assert.equal(state.queue.length, 5);
 });
 
 test('learning session interleaves and repeats failed views', () => {
   const course = tinyCourse();
-  const items = ['c:の', 'c:は', 'c:な'].map((id) => course.items.get(id));
+  const items = ['c:日', 'c:本', 'c:人'].map((id) => course.items.get(id));
   const s = new LearningSession(items);
   const seen = [];
   let failedOnce = false;
@@ -204,7 +204,7 @@ test('learning session interleaves and repeats failed views', () => {
   }
   assert.ok(s.done);
   // each item presented first, never the same item twice in a row while others are live
-  assert.equal(seen[0], 'の:present');
+  assert.equal(seen[0], '日:present');
   assert.equal(seen.filter((v) => v.endsWith('mc-recall')).length, 4);
   assert.equal(seen.length, 13);
   for (let i = 1; i < seen.length - 2; i++) assert.notEqual(seen[i].split(':')[0], seen[i - 1].split(':')[0]);

@@ -4,6 +4,10 @@ import {
 } from './engine.js';
 import { preview, formatInterval, AGAIN, HARD, GOOD, EASY, DEFAULT_SRS } from './srs.js';
 import { LearningSession } from './session.js';
+import {
+  KINDS, KIND_NAMES, snapshot, knownOverTime, reviewHistory, successRates, forecast, upcoming, hardest, daysOfHistory,
+} from './analytics.js';
+import { stackedBars, lineChart, hBars, bindCharts, hideTip, tableHtml, legendHtml } from './charts.js';
 import { loadState, saveState, clearState, exportState, readImport, requestPersistence } from './store.js';
 import { romajiToKana, normalizeAnswer, kataToHira } from './kana.js';
 import {
@@ -23,14 +27,14 @@ let reviewRun = null; // { done, again, startedAt }
 
 async function boot() {
   const base = `data/${LEVEL.toLowerCase()}/`;
-  const files = ['characters', 'words', 'sentences', 'grammar', 'meta'];
-  const [characters, words, sentences, grammar, meta] = await Promise.all(
+  const files = ['characters', 'words', 'sentences', 'grammar', 'kana', 'meta'];
+  const [characters, words, sentences, grammar, kana, meta] = await Promise.all(
     files.map((f) => fetch(`${base}${f}.json`).then((r) => {
       if (!r.ok) throw new Error(`${f}.json: ${r.status}`);
       return r.json();
     })),
   );
-  course = buildCourse({ characters, words, sentences, grammar, meta });
+  course = buildCourse({ characters, words, sentences, grammar, kana, meta });
   state = loadState(LEVEL);
   state = state ? reconcile(course, state) : initialState(course);
   persist();
@@ -71,6 +75,7 @@ function toast(html, ms = 3500) {
 
 function route() {
   keyHandler = null;
+  hideTip();
   const hash = location.hash.replace(/^#\/?/, '');
   const [page, arg] = hash.split('/');
   const tab = page || 'home';
@@ -89,6 +94,7 @@ function route() {
     case 'browse': return renderBrowse(arg || 'characters');
     case 'item': return renderItem(decodeURIComponent(arg || ''));
     case 'settings': return renderSettings();
+    case 'stats': return renderStats(arg);
     default: return renderHome();
   }
 }
@@ -114,8 +120,7 @@ function whenText(ms) {
 
 function renderHome() {
   const s = stats(course, state);
-  const kana = course.characters.filter((c) => c.type !== 'kanji');
-  const kanji = course.characters.filter((c) => c.type === 'kanji');
+  const kanji = course.characters;
   const known = (list) => list.filter((c) => state.cards[c.id]?.passedFinal).length;
   const nextItems = state.queue.slice(0, 12).map((id) => course.items.get(id));
   const nd = nextDueTime(state);
@@ -135,8 +140,6 @@ function renderHome() {
 
     <section class="panel">
       <h2>Progress</h2>
-      <div class="progress-row"><div class="progress-head"><span>Kana</span><span>${known(kana)} / ${kana.length}</span></div>
-        ${bar([{ n: known(kana), cls: 'known', label: 'known' }], kana.length)}</div>
       <div class="progress-row"><div class="progress-head"><span>Kanji</span><span>${known(kanji)} / ${kanji.length}</span></div>
         ${bar([{ n: known(kanji), cls: 'known', label: 'known' }], kanji.length)}</div>
       <div class="progress-row"><div class="progress-head"><span>Words &amp; phrases</span><span>${s.word.known} / ${s.word.total}</span></div>
@@ -144,7 +147,7 @@ function renderHome() {
         ${legend([['known', 'Known', s.word.known], ['learning', 'Learning', s.word.learning], ['queued', 'Unlocked', s.word.queued], ['locked', 'Locked', lockedWords]])}</div>
       <div class="progress-row"><div class="progress-head"><span>Sentences</span><span>${s.cloze.known} / ${s.cloze.total}</span></div>
         ${bar([{ n: s.cloze.known, cls: 'known', label: 'known' }, { n: s.cloze.learning, cls: 'learning', label: 'learning' }, { n: s.cloze.queued, cls: 'queued', label: 'queued' }], s.cloze.total)}</div>
-      <p class="muted small">Today: ${s.learnedToday} learned · ${s.reviewsToday} reviews</p>
+      <p class="muted small">Today: ${s.learnedToday} learned · ${s.reviewsToday} reviews · <a href="#/stats">Detailed stats →</a></p>
     </section>
 
     <section class="panel">
@@ -156,11 +159,11 @@ function renderHome() {
     <details class="panel how">
       <summary>How it works</summary>
       <ol>
-        <li><b>Characters first, by frequency.</b> Kana and N5 kanji are queued from most to least common in real Japanese sentences.</li>
+        <li><b>Kanji and kana words, by frequency.</b> The queue starts with the N5 kanji and every word that needs no N5 kanji, interleaved from most to least common. Kana are learned through words.</li>
         <li><b>Learn</b> sessions teach ${state.settings.batchSize} items at a time with several different views (presentation, multiple choice both ways, flashcard).</li>
         <li><b>Review</b> shows each card once, Anki-style: recall it, reveal, and rate yourself <i>Again / Hard / Good / Easy</i>.</li>
         <li>Each successful review moves a card to the next form: <b>romaji → kana → kanji</b>, each tested against the English meaning.</li>
-        <li>When a character passes its first review in its final form (kanji for kanji), every word you can now read jumps to the front of the queue, most frequent first.</li>
+        <li>When a kanji passes its first review in kanji form, every word you can now read jumps to the front of the queue, most frequent first.</li>
         <li>When a word passes its first kanji (or kana) review, 3–5 N5-level practice sentences are queued as <b>cloze</b> cards.</li>
       </ol>
     </details>
@@ -557,7 +560,7 @@ function announce(item, res) {
 // ------------------------------------------------------------------ browse
 
 const BROWSE_TABS = [['characters', 'Characters'], ['words', 'Words'], ['sentences', 'Sentences'], ['grammar', 'Grammar']];
-const browseFilters = { characters: 'all', words: 'all', sentences: 'all', q: '' };
+const browseFilters = { characters: 'kanji', words: 'all', sentences: 'all', q: '' };
 
 function renderBrowse(tab) {
   const tabs = `<nav class="subtabs">${BROWSE_TABS.map(([id, label]) => `<a href="#/browse/${id}" class="${id === tab ? 'on' : ''}">${label}</a>`).join('')}</nav>`;
@@ -572,12 +575,20 @@ function renderBrowse(tab) {
 
   let body = '';
   if (tab === 'characters') {
-    const f = browseFilters.characters;
-    const list = course.characters.filter((c) => f === 'all' || c.type === f);
-    body = `${filterBar('characters', [['all', 'All'], ['hiragana', 'Hiragana'], ['katakana', 'Katakana'], ['kanji', 'Kanji']])}
-      <p class="muted small">Ordered by frequency in Japanese sentences (most common first).</p>
-      <div class="char-grid">${list.map((c) => `<a class="tile tile-${status(c.id)}" href="#/item/${encodeURIComponent(c.id)}" title="${esc(c.type === 'kanji' ? c.meanings.join(', ') : c.romaji)}">
-        <span class="jp" lang="ja">${esc(c.char)}</span><small>${esc(c.type === 'kanji' ? c.meanings[0] : c.romaji.split(' (')[0])}</small></a>`).join('')}</div>`;
+    const f = browseFilters.characters === 'all' ? 'kanji' : browseFilters.characters;
+    browseFilters.characters = f;
+    if (f === 'kanji') {
+      body = `${filterBar('characters', [['kanji', 'Kanji'], ['hiragana', 'Hiragana'], ['katakana', 'Katakana']])}
+      <p class="muted small">The ${course.characters.length} N5 kanji, ordered by frequency in Japanese sentences (most common first).</p>
+      <div class="char-grid">${course.characters.map((c) => `<a class="tile tile-${status(c.id)}" href="#/item/${encodeURIComponent(c.id)}" title="${esc(c.meanings.join(', '))}">
+        <span class="jp" lang="ja">${esc(c.char)}</span><small>${esc(c.meanings[0])}</small></a>`).join('')}</div>`;
+    } else {
+      const list = course.kana.filter((c) => c.type === f);
+      body = `${filterBar('characters', [['kanji', 'Kanji'], ['hiragana', 'Hiragana'], ['katakana', 'Katakana']])}
+      <p class="muted small">Reference chart, most common first. Kana don't have cards of their own — you learn them through the kana stage of every word.</p>
+      <div class="char-grid">${list.map((c) => `<button class="tile tile-ref" data-say="${esc(c.char)}" title="${esc(c.romaji)}">
+        <span class="jp" lang="ja">${esc(c.char)}</span><small>${esc(c.romaji.split(' (')[0])}</small></button>`).join('')}</div>`;
+    }
   } else if (tab === 'words') {
     const f = browseFilters.words;
     const q = browseFilters.q.trim().toLowerCase();
@@ -612,6 +623,7 @@ function renderBrowse(tab) {
   }).join('')}`;
   }
   render(`${tabs}${body}`);
+  bindAudio();
   on('.fchip', 'click', (e) => {
     browseFilters[e.currentTarget.dataset.f] = e.currentTarget.dataset.v;
     renderBrowse(tab);
@@ -675,6 +687,151 @@ function renderItem(id) {
   bindAudio();
 }
 
+
+// ------------------------------------------------------------------ stats
+
+const RANGES = [['7', '7 days'], ['30', '30 days'], ['90', '90 days'], ['all', 'All time']];
+const SERIES_COLOR = { char: 'var(--series-1)', word: 'var(--series-2)', cloze: 'var(--series-3)' };
+const STAGE_NAMES = { romaji: 'Romaji', kana: 'Kana', kanji: 'Kanji', cloze: 'Cloze' };
+let statsRange = '30';
+
+const shortDate = (key) => `${Number(key.slice(5, 7))}/${Number(key.slice(8, 10))}`;
+const longDate = (key) => new Date(`${key}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+const pct = (r) => (r == null ? '—' : `${Math.round(r * 100)}%`);
+
+function renderStats(arg) {
+  if (arg && RANGES.some(([v]) => v === arg)) statsRange = arg;
+  const now = Date.now();
+  const n = statsRange === 'all' ? Math.min(365, daysOfHistory(state, now)) : Number(statsRange);
+  const rangeLabel = RANGES.find(([v]) => v === statsRange)[1].toLowerCase();
+  const snap = snapshot(course, state);
+  const rates = successRates(state, now, n);
+  const fc = forecast(course, state, now, 14);
+  const next = upcoming(course, state, 8);
+  const trouble = hardest(course, state, 10);
+  const dueNow = fc[0].total;
+  const week = fc.slice(0, 7).reduce((a, d) => a + d.total, 0);
+
+  const tile = (value, label, sub = '') => `<div class="stat"><b>${value}</b><span>${label}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
+  const kindRows = KINDS.map((k) => {
+    const b = snap[k];
+    const stages = Object.entries(b.stages).map(([st, c]) => `${STAGE_NAMES[st]} ${c}`).join(' · ') || '—';
+    return `<tr><th>${KIND_NAMES[k]}</th><td>${b.known}</td><td>${b.learning}</td><td>${b.queued}</td><td>${b.locked}</td><td>${b.total}</td><td class="muted">${stages}</td></tr>`;
+  }).join('');
+
+  const stageRows = [];
+  for (const kind of KINDS) {
+    const stages = kind === 'cloze' ? ['cloze'] : ['romaji', 'kana', 'kanji'];
+    for (const st of stages) {
+      const r = rates.byStage[`${kind}:${st}`];
+      if (!r) continue;
+      stageRows.push({ label: `${KIND_NAMES[kind]} · ${STAGE_NAMES[st]}`, value: r.rate, text: `${pct(r.rate)} of ${r.total}`, detail: `${r.passed} passed, ${r.failed} failed` });
+    }
+  }
+  const matRows = [['learning', 'Learning steps'], ['young', 'Young (< 21 days)'], ['mature', 'Mature (21+ days)']]
+    .map(([k, label]) => ({ label, value: rates.byMaturity[k].rate, text: rates.byMaturity[k].total ? `${pct(rates.byMaturity[k].rate)} of ${rates.byMaturity[k].total}` : '—', detail: `${rates.byMaturity[k].passed} passed, ${rates.byMaturity[k].failed} failed` }));
+  const totalRatings = rates.ratings.reduce((a, b) => a + b, 0);
+  const ratingRows = ['Again', 'Hard', 'Good', 'Easy'].map((label, i) => ({
+    label, value: totalRatings ? rates.ratings[i] / totalRatings : null,
+    text: totalRatings ? `${pct(rates.ratings[i] / totalRatings)} (${rates.ratings[i]})` : '—', detail: `${rates.ratings[i]} answers`,
+  }));
+  const itemLabel = (item) => (item.kind === 'char' ? item.char : item.kind === 'word' ? item.display : item.answer);
+
+  render(`
+    <h1 class="page-title">Stats</h1>
+    <div class="filters range">${RANGES.map(([v, l]) => `<a class="fchip ${v === statsRange ? 'on' : ''}" href="#/stats/${v}">${l}</a>`).join('')}</div>
+    <section class="stat-cards stat-cards-5">
+      ${tile(`${snap.char.known}<small>/${snap.char.total}</small>`, 'kanji known')}
+      ${tile(`${snap.word.known}<small>/${snap.word.total}</small>`, 'words known')}
+      ${tile(`${snap.cloze.known}<small>/${snap.cloze.total}</small>`, 'sentences known')}
+      ${tile(pct(rates.rate), `success, ${rangeLabel}`)}
+      ${tile(rates.reviews, `reviews, ${rangeLabel}`)}
+    </section>
+
+    <section class="panel">
+      <h2>What you've learned</h2>
+      <p class="muted small">Items that have passed their final form (kanji, or kana for kana words), ${rangeLabel}.</p>
+      <div class="chart-slot" data-chart="known"></div>
+      <div class="table-scroll"><table class="breakdown">
+        <thead><tr><th></th><th>Known</th><th>Learning</th><th>Unlocked</th><th>Locked</th><th>Total</th><th>Cards by current form</th></tr></thead>
+        <tbody>${kindRows}</tbody></table></div>
+    </section>
+
+    <section class="panel">
+      <h2>Coming up</h2>
+      <p class="muted small">${dueNow} due today · ${week} in the next 7 days · ${state.queue.length} waiting in the to-be-learned queue. Next 14 days:</p>
+      <div class="chart-slot" data-chart="forecast"></div>
+      ${next.length ? `<h3>Next reviews</h3><ul class="list upcoming">${next.map(({ card, item, stage }) => `<li><a href="#/item/${encodeURIComponent(item.id)}">
+          <span class="w-jp jp" lang="ja">${esc(itemLabel(item))}</span>
+          <span class="w-en">${esc(kindLabel(item))} · ${esc(STAGE_NAMES[stage])}</span>
+          <span class="when">${whenText(card.due)}</span></a></li>`).join('')}</ul>` : '<p class="muted">Nothing scheduled yet — learn some items first.</p>'}
+    </section>
+
+    <section class="panel">
+      <h2>Reviews per day</h2>
+      <p class="muted small">Passed (Hard / Good / Easy) vs failed (Again), ${rangeLabel}.</p>
+      <div class="chart-slot" data-chart="history"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Success rate</h2>
+      <p class="muted small">Share of reviews not answered “Again”, ${rangeLabel}.</p>
+      <h3>By item and form</h3>
+      ${stageRows.length ? hBars(stageRows) : '<p class="muted small">No reviews in this range.</p>'}
+      <h3>By card maturity</h3>
+      ${hBars(matRows)}
+      <h3>Answer buttons</h3>
+      ${hBars(ratingRows)}
+    </section>
+
+    <section class="panel">
+      <h2>Needs work</h2>
+      ${trouble.length ? `<ul class="list">${trouble.map(({ card, item }) => `<li><a href="#/item/${encodeURIComponent(item.id)}">
+          <span class="w-jp jp" lang="ja">${esc(itemLabel(item))}</span>
+          <span class="w-en">${esc(kindLabel(item))} · ${card.lapses} lapse${card.lapses === 1 ? '' : 's'} · ease ${Math.round(card.ease * 100)}%</span></a></li>`).join('')}</ul>`
+    : '<p class="muted small">No lapses yet — items you forget after learning will show up here.</p>'}
+    </section>`);
+
+  drawStatsCharts({ n, fc });
+  bindAudio();
+}
+
+function drawStatsCharts({ n, fc }) {
+  const now = Date.now();
+  const slot = (name) => app.querySelector(`[data-chart="${name}"]`);
+  const every = (len) => Math.max(1, Math.ceil(len / 6));
+
+  const known = knownOverTime(course, state, now, n);
+  const knownSeries = KINDS.map((k) => ({ key: k, name: KIND_NAMES[k], color: SERIES_COLOR[k], values: known.series[k] }));
+  const ks = slot('known');
+  ks.innerHTML = `${legendHtml(knownSeries, 'line')}${lineChart(ks.clientWidth, {
+    labels: known.keys.map(shortDate), titles: known.keys.map(longDate), series: knownSeries, labelEvery: every(n),
+  })}${tableHtml(['Date', ...knownSeries.map((s) => s.name)], known.keys.map((k, i) => [k, ...knownSeries.map((s) => s.values[i])]).reverse())}`;
+
+  const fSeries = KINDS.map((k) => ({ key: k, name: KIND_NAMES[k], color: SERIES_COLOR[k] }));
+  const fs = slot('forecast');
+  fs.innerHTML = `${legendHtml(fSeries)}${stackedBars(fs.clientWidth, {
+    rows: fc.map((d, i) => ({ label: i === 0 ? 'Today' : shortDate(d.key), title: `${i === 0 ? 'Today (incl. overdue)' : longDate(d.key)} · ${d.total} due`, values: d })),
+    series: fSeries, labelEvery: 3,
+  })}${tableHtml(['Date', ...fSeries.map((s) => s.name), 'Total'], fc.map((d) => [d.key, d.char, d.word, d.cloze, d.total]))}`;
+
+  const hist = reviewHistory(state, now, n);
+  const hSeries = [{ key: 'passed', name: 'Passed', color: 'var(--series-1)' }, { key: 'failed', name: 'Failed', color: 'var(--series-2)' }];
+  const hs = slot('history');
+  hs.innerHTML = `${legendHtml(hSeries)}${stackedBars(hs.clientWidth, {
+    rows: hist.map((d) => ({ label: shortDate(d.key), title: `${longDate(d.key)} · ${d.passed + d.failed} reviews, ${d.learned} learned`, values: d })),
+    series: hSeries, labelEvery: every(n),
+  })}${tableHtml(['Date', 'Passed', 'Failed', 'Success', 'New learned'], hist.map((d) => [d.key, d.passed, d.failed, d.passed + d.failed ? pct(d.passed / (d.passed + d.failed)) : '—', d.learned]).reverse())}`;
+
+  bindCharts(app);
+}
+
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (location.hash.startsWith('#/stats')) renderStats(); }, 200);
+});
+
 // ------------------------------------------------------------------ settings
 
 function renderSettings() {
@@ -708,7 +865,7 @@ function renderSettings() {
   </section>
   <section class="panel">
     <h2>About the ${esc(meta.level)} data</h2>
-    <p class="small">${meta.counts.characters} characters (${meta.counts.characters - meta.counts.kanji} kana + ${meta.counts.kanji} kanji) · ${meta.counts.words} words &amp; phrases · ${meta.counts.sentences} sentences · ${meta.counts.grammar} grammar patterns.</p>
+    <p class="small">${meta.counts.kanji} kanji · ${meta.counts.kana} kana (reference chart) · ${meta.counts.words} words &amp; phrases · ${meta.counts.sentences} sentences · ${meta.counts.grammar} grammar patterns.</p>
     <ul class="small">${meta.sources.map((src) => `<li><a href="${esc(src.url)}" target="_blank" rel="noopener">${esc(src.name)}</a> — ${esc(src.license)}</li>`).join('')}</ul>
   </section>`);
   const form = app.querySelector('#settings');
