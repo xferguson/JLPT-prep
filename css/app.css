@@ -502,3 +502,11 @@ kbd { display: none; }
 .upcoming .when { font-size: 13px; color: var(--muted); white-space: nowrap; }
 .tile-ref { font: inherit; cursor: pointer; border-bottom-color: var(--line); }
 .tabbar a { font-size: 11px; }
+
+/* play */
+.play-panel { padding: 14px 18px; }
+.play-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 10px; }
+.play-head h2 { margin: 0; }
+.play-buttons { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px; }
+.play-buttons .btn { white-space: nowrap; padding: 10px 8px; }
+.play-count { font-variant-numeric: tabular-nums; }

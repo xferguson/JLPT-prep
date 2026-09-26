@@ -60,6 +60,10 @@ A view you get wrong comes back later in the same session. New items are
 brought in one at a time, and the next one only appears after the current
 ones have had a couple of tests.
 
+Each item is saved as soon as it has passed all of its views. If you leave a
+session early, every item you finished is kept; only the unfinished ones go
+back to the queue.
+
 ### 3. Reviews (Anki-style), with one view per review
 Reviews use an SM-2 scheduler like Anki's: learning steps (10 min, 1 day),
 graduation, ease factors, lapses and relearning. You recall the answer, reveal
@@ -89,13 +93,29 @@ that point, every word whose N5 kanji are all known (140 words need at least
 one) goes to the **front** of the queue, so you learn it next. When several
 words unlock at once, the most frequent comes first.
 
-### 5. Words unlock cloze sentences (Clozemaster-style)
-When a word passes its first review at its final stage, its 3–5 practice
-sentences go to the front of the queue as **cloze** cards. Each card shows a
-sentence with the word blanked out, plus the English translation. You answer
-by multiple choice or by typing. Typed romaji is converted to kana as you
-type. Then you rate yourself; the rating is pre-suggested from whether you got
-it right.
+### 5. Words unlock cloze sentences (Clozemaster-style), one at a time
+Each word has 3–5 practice sentences, shown as **cloze** cards. They unlock
+one at a time, so you never get several sentences for the same word in a row:
+
+- When a word passes its first review at its final stage, its first
+  (shortest) sentence joins the queue.
+- When that sentence passes its first review, the word's next sentence joins
+  the queue, and so on.
+- Sentences always queue **behind** kanji and words, first unlocked, first
+  learned. For example, with words x and y learned in that order, the queue
+  gets xA, then yA, and xB only once xA has passed.
+
+Each card shows a sentence with the word blanked out, plus the English
+translation. You answer by multiple choice or by typing. Typed romaji is
+converted to kana as you type. Then you rate yourself; the rating is
+pre-suggested from whether you got it right.
+
+**Typing the word counts as a review of the word.** When you type the missing
+word correctly in a sentence review, the word's own card is reviewed too, so
+its next review moves out and you skip a review you'd otherwise do. The
+credit is scheduled from how long it has really been since the word's last
+review (like Anki's early review), and only applies when it would move the
+word's review later, never sooner. Multiple-choice answers don't count.
 
 Sentences are chosen to be as close to N5 as the corpus allows. Every
 sentence is tokenised, and sentences where every content word is on the N5
@@ -104,19 +124,34 @@ first. Words used in conjugated forms are matched too (食べ**ました** count
 for 食べる). Furigana is shown over any kanji you haven't learned yet, and
 sentences are tagged with the N5 grammar patterns they use.
 
+### 6. Play: the next N cards
+**Play** (on Home: 10, your default of 20, or 50) runs the next N cards, with
+reviews and new items mixed together, so the daily habit can simply be "N
+cards" whatever they turn out to be.
+
+- Due reviews come first, most overdue first.
+- New items (within today's new-item limit) are spread evenly through the due
+  pile, and their learning views are interleaved with the reviews.
+- A review or a finished new item counts as one card.
+- Everything is saved as you go, so stopping part-way loses nothing.
+
+Home shows today's total ("cards played") next to the reviews and new items it
+was made of.
+
 ### Stats
 The **Stats** tab has a date range (7 / 30 / 90 days / all time) that applies
 to every history chart on the page. It shows:
 
-- **Totals**: kanji, words and sentences known, plus the success rate and
-  review count for the chosen range.
+- **Totals**: kanji, words and sentences known, the success rate, and cards
+  played (reviews + new items learned) for the chosen range.
 - **What you've learned**: known items over time, one line each for kanji,
   words and sentences. A table below breaks each kind down into known /
   learning / unlocked / locked, and shows how many cards are at each form
   (romaji / kana / kanji).
 - **Coming up**: reviews due each day for the next 14 days, split by kind,
   plus the next cards due and the size of the to-be-learned queue.
-- **Reviews per day**: passed vs failed (Again) for each day.
+- **Cards played per day**: reviews passed, reviews failed (Again) and new
+  items learned for each day, plus how many word reviews typing earned.
 - **Success rate**: broken down by item type and form (e.g. Words · Kanji),
   by card maturity (learning / young / mature, as in Anki), and by answer
   button.
@@ -130,7 +165,7 @@ review, so storage stays small.
 - **Browse**: kanji (plus a kana chart), words, sentences and grammar, with status
   (known / learning / queued / locked). Each item page shows its SRS state,
   what it's waiting on, and the words or sentences it unlocks.
-- **Settings**: new items per day, session size, learning and relearning
+- **Settings**: new items per day, session size, default Play length, learning and relearning
   steps, cloze answer mode, furigana, and audio auto-play.
 - **Audio** uses the device's Japanese text-to-speech.
 - **Export / import** progress as JSON, for backup or moving to another
@@ -153,6 +188,7 @@ js/app.js       screens, router, session UI
 js/engine.js    queue, unlocking and review bookkeeping (pure, tested)
 js/srs.js       Anki-style scheduler with stages (pure, tested)
 js/session.js   Memrise-style learning session planner (pure, tested)
+js/play.js      Play mode: mixes due reviews and new items (pure, tested)
 js/ui.js        rendering helpers (cards, furigana, multiple-choice options)
 js/analytics.js aggregations for the Stats view (pure, tested)
 js/charts.js    dependency-free SVG charts (stacked bars, lines, tooltips)

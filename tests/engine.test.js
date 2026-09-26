@@ -136,13 +136,14 @@ test('a kanji only counts once it passes a review on its kanji stage', () => {
   assert.ok(r3.passedFinalFirst);
 });
 
-test('learning a word queues its sentences as cloze cards', () => {
+test('learning a word queues its first sentence as a cloze card, behind words', () => {
   const course = tinyCourse();
   const state = initialState(course, 0);
   completeLearning(course, state, ['w:1'], 20 * MINUTE);
   const t = master(course, state, 'w:1', 30 * MINUTE);
   assert.ok(state.cards['w:1'].passedFinal);
-  assert.deepEqual(state.queue.slice(0, 2), ['z:1:0', 'z:1:1']); // shorter sentence first
+  assert.equal(state.queue.at(-1), 'z:1:0'); // shortest sentence, at the back of the queue
+  assert.ok(!state.queue.includes('z:1:1')); // the next one waits for this one
   const z = course.items.get('z:1:0');
   assert.equal(z.answer, 'はな');
   completeLearning(course, state, ['z:1:0'], t);
@@ -172,7 +173,7 @@ test('full real-data run: learning every kanji unlocks every word', () => {
   const w = course.words.find((x) => x.sentences.length >= 3 && state.queue.includes(x.id));
   completeLearning(course, state, [w.id], now);
   master(course, state, w.id, now);
-  assert.equal(state.queue.filter((id) => id.startsWith(`z:${w.id.slice(2)}:`)).length, w.sentences.length);
+  assert.equal(state.queue.filter((id) => id.startsWith(`z:${w.id.slice(2)}:`)).length, 1);
   assert.ok(dueCards(state, Infinity).length > 0);
 });
 

@@ -3,6 +3,9 @@
 // Items are introduced one at a time; a new item is only introduced once the
 // items already on screen have had a couple of tests. A failed view is
 // repeated later in the session.
+//
+// An item counts as learned as soon as it has passed all of its views; the
+// caller saves it right away, so leaving a session early keeps those items.
 
 export const LEARN_VIEWS = {
   char: ['present', 'mc-recognize', 'mc-recall', 'flip'],
@@ -11,16 +14,30 @@ export const LEARN_VIEWS = {
 };
 
 export class LearningSession {
-  constructor(items) {
-    this.items = items;
-    this.entries = items.map((item) => ({
-      item, pending: [...LEARN_VIEWS[item.kind]], progress: 0, mistakes: 0, introduced: false,
-    }));
+  constructor(items = []) {
+    this.items = [];
+    this.entries = [];
     this.nextNew = 0;
     this.last = null;
     this.current = null;
-    this.totalViews = this.entries.reduce((n, e) => n + e.pending.length, 0);
+    this.totalViews = 0;
     this.doneViews = 0;
+    this.finished = []; // items that have passed all their views, in order
+    items.forEach((item) => this.add(item));
+  }
+
+  // Add an item to be taught (used by Play mode to feed items one at a time).
+  add(item) {
+    const entry = { item, pending: [...LEARN_VIEWS[item.kind]], progress: 0, mistakes: 0, introduced: false };
+    this.items.push(item);
+    this.entries.push(entry);
+    this.totalViews += entry.pending.length;
+    return entry;
+  }
+
+  // Items added but not yet finished.
+  get inProgress() {
+    return this.entries.filter((e) => e.pending.length).map((e) => e.item);
   }
 
   get done() {
@@ -48,9 +65,10 @@ export class LearningSession {
   }
 
   // Mark the current view as passed (true) or failed (false).
+  // Returns the item if this view finished it (it is now learned), else null.
   result(ok) {
     const cur = this.current;
-    if (!cur) return;
+    if (!cur) return null;
     const e = cur.entry;
     const view = e.pending.shift();
     if (ok || view === 'present') {
@@ -62,6 +80,9 @@ export class LearningSession {
       this.totalViews++;
     }
     this.current = null;
+    if (e.pending.length) return null;
+    this.finished.push(e.item);
+    return e.item;
   }
 
   get progress() {

@@ -12,14 +12,19 @@
 //  * When a kanji passes its first review on its kanji stage it is "known".
 //    Every word whose kanji are all known is inserted at the FRONT of the
 //    queue (most frequent first).
-//  * When a word passes its first review on its final stage, its 3-5 practice
-//    sentences are inserted at the front of the queue as cloze cards.
+//  * Sentences (cloze cards) are unlocked one at a time per word: the word's
+//    first sentence when the word passes its final stage, the next one when
+//    the previous sentence passes its first review. They queue behind every
+//    kanji and word, first unlocked first learned.
+//  * Typing a word correctly in a sentence review also counts as a review of
+//    that word (see creditWord).
 
-import { answer as srsAnswer, introduce, newCard, DEFAULT_SRS } from './srs.js';
+import { answer as srsAnswer, introduce, newCard, DEFAULT_SRS, HARD, DAY } from './srs.js';
 
 export const DEFAULT_SETTINGS = {
   newPerDay: 20,
   batchSize: 5,
+  playSize: 20, // default length of a Play run (reviews + new, mixed)
   clozeMode: 'mixed', // 'mc' | 'type' | 'mixed'
   furigana: true,
   autoplayAudio: false,
@@ -110,6 +115,7 @@ function today(state, now) {
   d.by ||= {}; // "kind:stage" -> [passed, failed]
   d.mat ||= {}; // learning | young | mature -> [passed, failed]
   d.ratings ||= [0, 0, 0, 0];
+  d.credited ||= 0; // word reviews earned by typing the word in a sentence
   return d;
 }
 
@@ -130,6 +136,7 @@ export function stats(course, state, now = Date.now()) {
   const t = state.days[dayKey(now)] || { learned: 0, reviews: 0 };
   s.learnedToday = t.learned;
   s.reviewsToday = t.reviews;
+  s.playedToday = t.learned + t.reviews; // every card answered or learned today
   s.newLeftToday = Math.max(0, state.settings.newPerDay - t.learned);
   s.streak = streak(state, now);
   return s;
@@ -148,10 +155,12 @@ export function streak(state, now = Date.now()) {
   return n;
 }
 
-// Next items to learn. `ignoreLimit` lets the learner go past the daily cap.
-export function nextNewItems(course, state, now = Date.now(), { ignoreLimit = false } = {}) {
-  const left = ignoreLimit ? state.settings.batchSize
-    : Math.min(state.settings.batchSize, Math.max(0, state.settings.newPerDay - today(state, now).learned));
+// Next items to learn. `ignoreLimit` lets the learner go past the daily cap;
+// `limit` overrides the batch size.
+export function nextNewItems(course, state, now = Date.now(), { ignoreLimit = false, limit } = {}) {
+  const size = limit ?? state.settings.batchSize;
+  const left = ignoreLimit ? size
+    : Math.min(size, Math.max(0, state.settings.newPerDay - today(state, now).learned));
   const out = [];
   for (const id of state.queue) {
     if (out.length >= left) break;
@@ -223,12 +232,30 @@ export function unlockWords(course, state, now = Date.now()) {
   return enqueueFront(state, fresh.map((w) => w.id), now);
 }
 
-// Queue a learned word's practice sentences (shorter sentences first).
-export function unlockSentences(course, state, wordId, now = Date.now()) {
-  const clozes = (course.clozesByWord.get(wordId) || [])
-    .filter((z) => !state.unlocked[z.id] && !state.cards[z.id])
-    .sort((a, b) => a.len - b.len);
-  return enqueueFront(state, clozes.map((z) => z.id), now);
+// A word's sentences in the order they are learned (shortest first).
+export function sentencesOf(course, wordId) {
+  return [...(course.clozesByWord.get(wordId) || [])].sort((a, b) => a.len - b.len);
+}
+
+// The one sentence of a word that may be queued now: the first not-yet-learned
+// sentence, provided every earlier one has passed its first review.
+export function nextSentenceFor(course, state, wordId) {
+  for (const z of sentencesOf(course, wordId)) {
+    const card = state.cards[z.id];
+    if (!card) return z;
+    if (!card.passedFinal) return null; // the previous sentence is still being learned
+  }
+  return null;
+}
+
+// Queue a word's next sentence, behind all kanji and words (first come, first learned).
+export function unlockNextSentence(course, state, wordId, now = Date.now()) {
+  if (!state.cards[wordId]?.passedFinal) return [];
+  const z = nextSentenceFor(course, state, wordId);
+  if (!z || state.queue.includes(z.id)) return [];
+  state.queue.push(z.id);
+  state.unlocked[z.id] = now;
+  return [z.id];
 }
 
 function enqueueFront(state, ids, now) {
@@ -240,9 +267,31 @@ function enqueueFront(state, ids, now) {
 }
 
 /**
- * Record a review. Returns { card, stageAdvanced, passedFinalFirst, unlocked: [ids] }.
+ * Typing a word correctly in a sentence is a review of that word, so it can
+ * push the word's next review out. The credit is scheduled from the time that
+ * has actually passed since the word's last review (like Anki's early review)
+ * and only applies when it moves the word's due date later — it never makes a
+ * word come back sooner. Returns { wordId, due } or null.
  */
-export function review(course, state, id, rating, now = Date.now()) {
+export function creditWord(course, state, wordId, rating, now = Date.now()) {
+  const card = state.cards[wordId];
+  if (!card || card.state !== 'review' || rating < HARD) return null;
+  const item = course.items.get(wordId);
+  const last = card.lastReview ?? card.due - card.ivl * DAY;
+  const elapsedDays = Math.max(1, Math.round((now - last) / DAY));
+  const effective = { ...card, ivl: Math.min(card.ivl, elapsedDays) };
+  const res = srsAnswer(effective, rating, now, item.stages.length, srsConfig(state));
+  if (res.card.due <= card.due) return null;
+  state.cards[wordId] = { ...res.card, stage: card.stage, passedFinal: card.passedFinal, newStage: false };
+  today(state, now).credited++;
+  return { wordId, due: res.card.due };
+}
+
+/**
+ * Record a review. Returns { card, stageAdvanced, passedFinalFirst, unlocked: [ids], credited }.
+ * `typed`: a cloze answer was typed (not picked), so a pass also credits the word.
+ */
+export function review(course, state, id, rating, now = Date.now(), { typed = false } = {}) {
   const item = course.items.get(id);
   const prev = state.cards[id];
   const stage = stageOf(course, prev);
@@ -263,9 +312,11 @@ export function review(course, state, id, rating, now = Date.now()) {
   let unlocked = [];
   if (res.passedFinalFirst) {
     if (item.kind === 'char') unlocked = unlockWords(course, state, now);
-    else if (item.kind === 'word') unlocked = unlockSentences(course, state, id, now);
+    else if (item.kind === 'word') unlocked = unlockNextSentence(course, state, id, now);
+    else if (item.kind === 'cloze') unlocked = unlockNextSentence(course, state, item.wordId, now);
   }
-  return { ...res, unlocked };
+  const credited = item.kind === 'cloze' && typed ? creditWord(course, state, item.wordId, rating, now) : null;
+  return { ...res, unlocked, credited };
 }
 
 // Anki's maturity buckets: still in learning steps, young (< 21d), mature.
@@ -286,9 +337,22 @@ export function reconcile(course, state, now = Date.now()) {
     if (id.startsWith('w:')) state.unlocked[id] ||= now;
     if (!state.cards[id] && !queued.has(id)) state.queue.push(id);
   }
-  state.version = 2;
+  state.version = 3;
   unlockWords(course, state, now);
-  for (const w of course.words) if (state.cards[w.id]?.passedFinal) unlockSentences(course, state, w.id, now);
+  // one queued sentence per word at most (older versions queued them all)
+  const allowed = new Set();
+  for (const w of course.words) {
+    const z = state.cards[w.id]?.passedFinal ? nextSentenceFor(course, state, w.id) : null;
+    if (z) allowed.add(z.id);
+  }
+  state.queue = state.queue.filter((id) => {
+    if (!id.startsWith('z:') || allowed.has(id)) return true;
+    delete state.unlocked[id];
+    return false;
+  });
+  for (const w of course.words) unlockNextSentence(course, state, w.id, now);
+  // sentences always queue behind kanji and words
+  state.queue = [...state.queue.filter((id) => !id.startsWith('z:')), ...state.queue.filter((id) => id.startsWith('z:'))];
   return state;
 }
 

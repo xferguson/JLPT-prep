@@ -4,8 +4,9 @@ import {
 } from './engine.js';
 import { preview, formatInterval, AGAIN, HARD, GOOD, EASY, DEFAULT_SRS } from './srs.js';
 import { LearningSession } from './session.js';
+import { PlaySession } from './play.js';
 import {
-  KINDS, KIND_NAMES, snapshot, knownOverTime, reviewHistory, successRates, forecast, upcoming, hardest, daysOfHistory,
+  KINDS, KIND_NAMES, lastDays, snapshot, knownOverTime, reviewHistory, successRates, forecast, upcoming, hardest, daysOfHistory,
 } from './analytics.js';
 import { stackedBars, lineChart, hBars, bindCharts, hideTip, tableHtml, legendHtml } from './charts.js';
 import { loadState, saveState, clearState, exportState, readImport, requestPersistence } from './store.js';
@@ -22,6 +23,7 @@ let state;
 let keyHandler = null; // keyboard shortcuts for the current screen
 let learn = null; // active LearningSession
 let reviewRun = null; // { done, again, startedAt }
+let play = null; // active PlaySession
 
 // ------------------------------------------------------------------ boot
 
@@ -131,18 +133,20 @@ function route({ keepScroll = false } = {}) {
   const [page, arg] = hash.split('/');
   const tab = page || 'home';
   document.querySelectorAll('.tabbar a').forEach((a) => {
-    const active = a.dataset.tab === (tab === 'item' ? 'browse' : tab);
+    const active = a.dataset.tab === ({ item: 'browse', play: 'home' }[tab] || tab);
     a.classList.toggle('active', active);
     if (active) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
   if (tab !== 'learn') learn = null;
   if (tab !== 'review') reviewRun = null;
+  if (tab !== 'play') play = null;
   if (!keepScroll) window.scrollTo(0, 0);
   if (['home', 'stats', 'review'].includes(tab)) setTimeout(() => { lastSignature = idleScreen() ? screenSignature(tab) : ''; });
   switch (tab) {
     case 'learn': return renderLearn();
     case 'review': return renderReview();
+    case 'play': return renderPlay(arg);
     case 'browse': return renderBrowse(arg || 'characters');
     case 'item': return renderItem(decodeURIComponent(arg || ''));
     case 'settings': return renderSettings();
@@ -185,7 +189,12 @@ function renderHome() {
     <section class="stat-cards">
       <a class="stat ${s.due ? 'stat-hot' : ''}" href="#/review"><b>${s.due}</b><span>due now</span></a>
       <a class="stat" href="#/learn"><b>${s.newLeftToday}</b><span>new left today</span></a>
-      <div class="stat"><b>${s.streak}</b><span>day streak</span></div>
+      <div class="stat"><b>${s.playedToday}</b><span>cards today</span></div>
+    </section>
+    <section class="panel play-panel">
+      <div class="play-head"><h2>Play</h2><span class="muted small">reviews + new items, mixed${s.streak ? ` · ${s.streak}-day streak` : ''}</span></div>
+      <div class="play-buttons">${[...new Set([10, state.settings.playSize, 50])].sort((a, b) => a - b)
+    .map((n) => `<a class="btn ${n === state.settings.playSize ? 'btn-primary' : ''}" href="#/play/${n}">Play ${n}</a>`).join('')}</div>
     </section>
     <section class="actions">
       <a class="btn ${s.due ? 'btn-primary' : 'btn-muted'}" href="#/review">${s.due ? `Review ${s.due}` : `No reviews due${nd < Infinity ? ` · next ${whenText(nd)}` : ''}`}</a>
@@ -201,7 +210,7 @@ function renderHome() {
         ${legend([['known', 'Known', s.word.known], ['learning', 'Learning', s.word.learning], ['queued', 'Unlocked', s.word.queued], ['locked', 'Locked', lockedWords]])}</div>
       <div class="progress-row"><div class="progress-head"><span>Sentences</span><span>${s.cloze.known} / ${s.cloze.total}</span></div>
         ${bar([{ n: s.cloze.known, cls: 'known', label: 'known' }, { n: s.cloze.learning, cls: 'learning', label: 'learning' }, { n: s.cloze.queued, cls: 'queued', label: 'queued' }], s.cloze.total)}</div>
-      <p class="muted small">Today: ${s.learnedToday} learned · ${s.reviewsToday} reviews · <a href="#/stats">Detailed stats →</a></p>
+      <p class="muted small">Today: ${s.playedToday} cards played (${s.reviewsToday} reviews · ${s.learnedToday} learned) · <a href="#/stats">Detailed stats →</a></p>
     </section>
 
     <section class="panel">
@@ -214,11 +223,13 @@ function renderHome() {
       <summary>How it works</summary>
       <ol>
         <li><b>Kanji and kana words, by frequency.</b> The queue starts with the N5 kanji and every word that needs no N5 kanji, interleaved from most to least common. Kana are learned through words.</li>
-        <li><b>Learn</b> sessions teach ${state.settings.batchSize} items at a time with several different views (presentation, multiple choice both ways, flashcard).</li>
+        <li><b>Learn</b> sessions teach ${state.settings.batchSize} items at a time with several different views (presentation, multiple choice both ways, flashcard). Each item is saved as soon as it has passed its views, so you can stop any time.</li>
+        <li><b>Play</b> runs the next N cards — due reviews first, with new items spread through them — so the daily habit is just "N cards".</li>
         <li><b>Review</b> shows each card once, Anki-style: recall it, reveal, and rate yourself <i>Again / Hard / Good / Easy</i>.</li>
         <li>Each successful review moves a card to the next form: <b>romaji → kana → kanji</b>, each tested against the English meaning.</li>
         <li>When a kanji passes its first review in kanji form, every word you can now read jumps to the front of the queue, most frequent first.</li>
-        <li>When a word passes its first kanji (or kana) review, 3–5 N5-level practice sentences are queued as <b>cloze</b> cards.</li>
+        <li>When a word passes its first kanji (or kana) review, its first N5-level practice sentence is queued as a <b>cloze</b> card; each further sentence for that word unlocks when the previous one passes a review. Sentences wait behind kanji and words.</li>
+        <li>Typing a word correctly in a sentence also counts as a review of that word, pushing its next review out.</li>
       </ol>
     </details>
   `);
@@ -253,12 +264,15 @@ function renderLearn(ignoreLimit = false) {
   }
   const cur = learn.next();
   if (!cur) return finishLearning();
-  const { item, view } = cur;
   const head = `<div class="session-head">
-      <span class="pill pill-${item.kind}">${esc(kindLabel(item))}</span>
+      <span class="pill pill-${cur.item.kind}">${esc(kindLabel(cur.item))}</span>
       <div class="bar thin"><span class="seg seg-known" style="width:${Math.round(learn.progress * 100)}%"></span></div>
       <a class="close" href="#/" aria-label="End session">✕</a>
     </div>`;
+  return showLearnView(head, cur);
+}
+
+function showLearnView(head, { item, view }) {
   if (view === 'present') return presentView(head, item);
   if (view === 'mc-recognize' || view === 'mc-recall') return mcView(head, item, view === 'mc-recognize' ? 'recognize' : 'recall');
   if (view === 'flip') return flipLearnView(head, item);
@@ -267,20 +281,27 @@ function renderLearn(ignoreLimit = false) {
   return null;
 }
 
+// Save an item the moment it has passed all its learning views, so leaving a
+// session early keeps everything finished so far.
+function saveLearned(item) {
+  if (!item || state.cards[item.id]) return;
+  completeLearning(course, state, [item.id], Date.now());
+  persist();
+}
+
 function nextLearn(ok) {
-  learn.result(ok);
+  if (play) return playLearnResult(ok);
+  saveLearned(learn.result(ok));
   renderLearn();
 }
 
 function finishLearning() {
-  const ids = learn.items.map((i) => i.id);
+  const items = learn.finished;
   const mistakes = learn.entries.reduce((n, e) => n + e.mistakes, 0);
-  completeLearning(course, state, ids, Date.now());
-  persist();
   const first = state.settings.learningSteps[0];
   render(`<section class="panel center">
-    <h2>Learned ${ids.length} new item${ids.length === 1 ? '' : 's'}</h2>
-    <div class="chips center">${learn.items.map(chip).join('')}</div>
+    <h2>Learned ${items.length} new item${items.length === 1 ? '' : 's'}</h2>
+    <div class="chips center">${items.map(chip).join('')}</div>
     <p class="muted">${mistakes ? `${mistakes} slip${mistakes === 1 ? '' : 's'} along the way. ` : 'Flawless! '}First review in ${formatInterval(first * 60000)}.</p>
     <div class="actions"><button class="btn btn-primary" id="again">Learn more</button><a class="btn" href="#/">Home</a></div>
   </section>`);
@@ -565,19 +586,28 @@ function renderReview() {
   }
   const card = due[0];
   const item = course.items.get(card.id);
-  const view = reviewView(course, state, card);
   const head = `<div class="session-head">
       <span class="pill pill-${item.kind}">${esc(kindLabel(item))}</span>
       <span class="muted small">${due.length} due · ${reviewRun.done} done</span>
       <a class="close" href="#/" aria-label="End reviews">✕</a>
     </div>`;
-  const rate = (rating) => {
-    const res = review(course, state, card.id, rating, Date.now());
+  showReviewCard(card, head, (rating) => {
     reviewRun.done++;
     if (rating === AGAIN) reviewRun.again++;
+    renderReview();
+  });
+}
+
+// One review, in whichever view the card is due for. Records the answer, then
+// calls after(rating, result).
+function showReviewCard(card, head, after) {
+  const item = course.items.get(card.id);
+  const view = reviewView(course, state, card);
+  const rate = (rating) => {
+    const res = review(course, state, card.id, rating, Date.now(), { typed: view.mode === 'type' });
     persist();
     announce(item, res);
-    renderReview();
+    after(rating, res);
   };
   if (item.kind === 'cloze') {
     clozeView(head, item, view.mode, rate, { card });
@@ -603,12 +633,93 @@ function announce(item, res) {
       const shown = unlockedItems.slice(0, 5).map((w) => esc(w.display)).join('、');
       msgs.push(`<b lang="ja">${esc(item.char)}</b> learned! Unlocked ${res.unlocked.length} word${res.unlocked.length === 1 ? '' : 's'}: <span lang="ja">${shown}${res.unlocked.length > 5 ? '…' : ''}</span>`);
     } else {
-      msgs.push(`Added ${res.unlocked.length} practice sentence${res.unlocked.length === 1 ? '' : 's'} for <b lang="ja">${esc(item.display)}</b>`);
+      const word = course.items.get(item.kind === 'cloze' ? item.wordId : item.id);
+      msgs.push(`Next practice sentence for <b lang="ja">${esc(word.display)}</b> added to your queue`);
     }
   } else if (res.passedFinalFirst && item.kind === 'char') {
     msgs.push(`<b lang="ja">${esc(item.char)}</b> learned!`);
   }
+  if (res.credited) {
+    const word = course.items.get(res.credited.wordId);
+    msgs.push(`Typed it — counts as a review of <b lang="ja">${esc(word.display)}</b> too (next ${whenText(res.credited.due)})`);
+  }
   if (msgs.length) toast(msgs.join('<br>'));
+}
+
+// ------------------------------------------------------------------ play (mixed reviews + new)
+
+function renderPlay(arg) {
+  if (!play) {
+    const n = Math.max(1, Math.min(500, parseInt(arg, 10) || state.settings.playSize));
+    play = new PlaySession(n);
+  }
+  playStep();
+}
+
+function playHead(item) {
+  return `<div class="session-head">
+      <span class="pill pill-${item.kind}">${esc(kindLabel(item))}</span>
+      <div class="bar thin" aria-label="${play.played} of ${play.target} cards"><span class="seg seg-known" style="width:${Math.round(play.progress * 100)}%"></span></div>
+      <span class="muted small play-count">${play.played}/${play.target}</span>
+      <a class="close" href="#/" aria-label="End play">✕</a>
+    </div>`;
+}
+
+function playStep() {
+  const now = Date.now();
+  const due = dueCards(state, now);
+  const inPlay = new Set(play.learn.items.map((i) => i.id));
+  const live = play.learn.inProgress.length;
+  const newLeft = play.extraNew ? Infinity : stats(course, state, now).newLeftToday - live;
+  const newItem = newLeft > 0
+    ? nextNewItems(course, state, now, { ignoreLimit: true, limit: live + 3 }).find((i) => !inPlay.has(i.id)) || null
+    : null;
+  const step = play.next({ due: due.length, newItem, newLeft: Number.isFinite(newLeft) ? newLeft : 1e9 });
+  if (step.type === 'introduce') {
+    play.introduce(step.item);
+    return playStep();
+  }
+  if (step.type === 'learn') {
+    const cur = play.learn.next();
+    return showLearnView(playHead(cur.item), cur);
+  }
+  if (step.type === 'review') {
+    const card = due[0];
+    return showReviewCard(card, playHead(course.items.get(card.id)), (rating, res) => {
+      play.reviewed(rating, !!res.credited);
+      playStep();
+    });
+  }
+  return finishPlay();
+}
+
+function playLearnResult(ok) {
+  saveLearned(play.learnResult(ok));
+  playStep();
+}
+
+function finishPlay() {
+  const p = play;
+  const s = stats(course, state);
+  const limitHit = p.reason === 'empty' && s.newLeftToday === 0 && state.queue.length > 0 && !p.extraNew;
+  const rate = p.reviews ? Math.round(((p.reviews - p.again) / p.reviews) * 100) : null;
+  render(`<section class="panel center">
+    <h2>${p.reason === 'target' ? `Played ${p.played} card${p.played === 1 ? '' : 's'}` : p.played ? `Played ${p.played} — that's everything for now` : 'Nothing to play right now'}</h2>
+    <p class="muted">${p.reviews} review${p.reviews === 1 ? '' : 's'}${rate != null ? ` (${rate}% remembered)` : ''} · ${p.learned} new learned${p.credited ? ` · ${p.credited} word review${p.credited === 1 ? '' : 's'} earned by typing` : ''}</p>
+    <p class="muted small">Today so far: ${s.playedToday} cards played (${s.reviewsToday} reviews · ${s.learnedToday} learned).</p>
+    ${limitHit ? `<p class="muted small">No reviews are due and you've reached today's ${state.settings.newPerDay} new items.</p>` : ''}
+    ${p.reason === 'empty' && !limitHit && p.played === 0 ? `<p class="muted small">Next review ${whenText(nextDueTime(state))}.</p>` : ''}
+    <div class="actions">
+      ${p.reason === 'target' ? `<a class="btn btn-primary" href="#/play/${p.target}" id="again">Play ${p.target} more</a>` : ''}
+      ${limitHit ? `<button class="btn btn-primary" id="extra">Keep going with new items</button>` : ''}
+      <a class="btn" href="#/">Home</a>
+    </div>
+  </section>`);
+  // the Play-more link keeps the same hash, so start the next run by hand
+  on('#again', 'click', (e) => { e.preventDefault(); play = null; renderPlay(String(p.target)); });
+  on('#extra', 'click', () => { play = new PlaySession(p.target); play.extraNew = true; playStep(); });
+  keyHandler = (e) => { if (e.key === 'Enter') app.querySelector('#again, #extra')?.click(); };
+  updateBadge();
 }
 
 // ------------------------------------------------------------------ browse
@@ -766,6 +877,10 @@ function renderStats(arg) {
   const dueNow = fc[0].total;
   const week = fc.slice(0, 7).reduce((a, d) => a + d.total, 0);
 
+  const hist = reviewHistory(state, now, n);
+  const learnedRange = hist.reduce((a, d) => a + d.learned, 0);
+  const playedRange = rates.reviews + learnedRange;
+  const creditedRange = lastDays(now, n).reduce((a, k) => a + (state.days[k]?.credited || 0), 0);
   const tile = (value, label, sub = '') => `<div class="stat"><b>${value}</b><span>${label}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
   const kindRows = KINDS.map((k) => {
     const b = snap[k];
@@ -799,7 +914,7 @@ function renderStats(arg) {
       ${tile(`${snap.word.known}<small>/${snap.word.total}</small>`, 'words known')}
       ${tile(`${snap.cloze.known}<small>/${snap.cloze.total}</small>`, 'sentences known')}
       ${tile(pct(rates.rate), `success, ${rangeLabel}`)}
-      ${tile(rates.reviews, `reviews, ${rangeLabel}`)}
+      ${tile(playedRange, `cards played, ${rangeLabel}`, `${rates.reviews} reviews · ${learnedRange} learned`)}
     </section>
 
     <section class="panel">
@@ -822,8 +937,8 @@ function renderStats(arg) {
     </section>
 
     <section class="panel">
-      <h2>Reviews per day</h2>
-      <p class="muted small">Passed (Hard / Good / Easy) vs failed (Again), ${rangeLabel}.</p>
+      <h2>Cards played per day</h2>
+      <p class="muted small">Reviews passed (Hard / Good / Easy) and failed (Again), plus new items learned, ${rangeLabel}.${creditedRange ? ` Typing words in sentences also earned ${creditedRange} word review${creditedRange === 1 ? '' : 's'} without extra cards.` : ''}</p>
       <div class="chart-slot" data-chart="history"></div>
     </section>
 
@@ -870,12 +985,16 @@ function drawStatsCharts({ n, fc }) {
   })}${tableHtml(['Date', ...fSeries.map((s) => s.name), 'Total'], fc.map((d) => [d.key, d.char, d.word, d.cloze, d.total]))}`;
 
   const hist = reviewHistory(state, now, n);
-  const hSeries = [{ key: 'passed', name: 'Passed', color: 'var(--series-1)' }, { key: 'failed', name: 'Failed', color: 'var(--series-2)' }];
+  const hSeries = [
+    { key: 'passed', name: 'Passed', color: 'var(--series-1)' },
+    { key: 'failed', name: 'Failed', color: 'var(--series-2)' },
+    { key: 'learned', name: 'Learned', color: 'var(--series-3)' },
+  ];
   const hs = slot('history');
   hs.innerHTML = `${legendHtml(hSeries)}${stackedBars(hs.clientWidth, {
-    rows: hist.map((d) => ({ label: shortDate(d.key), title: `${longDate(d.key)} · ${d.passed + d.failed} reviews, ${d.learned} learned`, values: d })),
+    rows: hist.map((d) => ({ label: shortDate(d.key), title: `${longDate(d.key)} · ${d.passed + d.failed + d.learned} cards played`, values: d })),
     series: hSeries, labelEvery: every(n),
-  })}${tableHtml(['Date', 'Passed', 'Failed', 'Success', 'New learned'], hist.map((d) => [d.key, d.passed, d.failed, d.passed + d.failed ? pct(d.passed / (d.passed + d.failed)) : '—', d.learned]).reverse())}`;
+  })}${tableHtml(['Date', 'Played', 'Passed', 'Failed', 'Learned', 'Success'], hist.map((d) => [d.key, d.passed + d.failed + d.learned, d.passed, d.failed, d.learned, d.passed + d.failed ? pct(d.passed / (d.passed + d.failed)) : '—']).reverse())}`;
 
   bindCharts(app);
 }
@@ -896,6 +1015,7 @@ function renderSettings() {
     <form id="settings" class="settings">
       <label><span>New items per day</span> <input type="number" name="newPerDay" min="1" max="200" value="${s.newPerDay}"></label>
       <label><span>Items per learning session</span> <input type="number" name="batchSize" min="1" max="20" value="${s.batchSize}"></label>
+      <label><span>Default Play length (cards)</span> <input type="number" name="playSize" min="1" max="500" value="${s.playSize}"></label>
       <label><span>Learning steps (minutes)</span> <input type="text" name="learningSteps" value="${s.learningSteps.join(' ')}" pattern="[0-9 ]+"></label>
       <label><span>Relearning steps (minutes)</span> <input type="text" name="relearningSteps" value="${s.relearningSteps.join(' ')}" pattern="[0-9 ]+"></label>
       <label><span>Cloze answers</span>
@@ -934,6 +1054,7 @@ function renderSettings() {
       ...state.settings,
       newPerDay: clampInt(fd.get('newPerDay'), 1, 200, DEFAULT_SETTINGS.newPerDay),
       batchSize: clampInt(fd.get('batchSize'), 1, 20, DEFAULT_SETTINGS.batchSize),
+      playSize: clampInt(fd.get('playSize'), 1, 500, DEFAULT_SETTINGS.playSize),
       learningSteps: steps(fd.get('learningSteps'), DEFAULT_SETTINGS.learningSteps),
       relearningSteps: steps(fd.get('relearningSteps'), DEFAULT_SETTINGS.relearningSteps),
       clozeMode: fd.get('clozeMode'),
