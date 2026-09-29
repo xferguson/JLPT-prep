@@ -138,6 +138,55 @@ cards" whatever they turn out to be.
 Home shows today's total ("cards played") next to the reviews and new items it
 was made of.
 
+### 7. Difficult words and mix-ups
+**Flagging.** A word or kanji you answer **Again twice in a row** in reviews
+becomes **Difficult**. Missing a sentence card twice in a row flags the word
+it tests. You can also mark or unmark any word or kanji on its page.
+Difficult cards leave your normal reviews and Play. Home shows how many are
+waiting, so your review pile and success rate aren't dragged down by the same
+few words.
+
+**The Difficult drill** (Home → Difficult) takes up to 10 at a time, in
+small interleaved groups:
+
+1. **Re-teach**: the full card again, a breakdown of each kanji (meaning and
+   readings), an example sentence, the words you've mixed it up with, and a
+   note or mnemonic you can write. Your note also shows on the answer side of
+   normal reviews.
+2. **Side-by-side + tell apart** (only if you've mixed it up with something):
+   - The words are shown next to each other with the differing sounds
+     highlighted (はな / はな<mark>し</mark>), or marked "same sound" for
+     homophones (花 / 鼻).
+   - Then come quick rounds of "which one is it?", by meaning, by reading or
+     by ear. They continue until you've got every word right and a run of
+     (group size + 1) in a row, at most 12 rounds.
+3. **Four tests**: pick the meaning, pick the form, type the reading, and
+   listen and pick the meaning. Listening is skipped if the device has no
+   Japanese voice.
+   - Multiple-choice wrong answers are drawn from the word's look-alikes, so
+     elimination doesn't help.
+   - A missed test comes back after 1, then 3, then 6 other cards.
+
+A drill where every test passes with no misses **graduates** the word. It
+goes back to normal reviews, due in 1 day, on probation: one more miss there
+flags it again straight away. When the app first loads this version, any
+word or kanji that is failing right now after 2+ lapses is flagged, so your
+current trouble words start in the drill.
+
+**Mix-ups** are recorded automatically whenever you pick another word in
+multiple choice (learning, reviews, Play, drill) or type another word's
+reading in a sentence card. Each word also has precomputed look-alikes from
+the data, ranked by how they could be confused:
+
+- same kana (花/鼻)
+- one sound apart (会社/医者, 今日/昨日)
+- a shared kanji
+- similar English meaning (暑い/熱い)
+
+A word's page lists what you've mixed it up with (and how often) and its
+likely look-alikes, with a **Drill this group** button for a tell-apart-only
+drill.
+
 ### Stats
 The **Stats** tab has a date range (7 / 30 / 90 days / all time) that applies
 to every history chart on the page. It shows:
@@ -189,6 +238,7 @@ js/engine.js    queue, unlocking and review bookkeeping (pure, tested)
 js/srs.js       Anki-style scheduler with stages (pure, tested)
 js/session.js   Memrise-style learning session planner (pure, tested)
 js/play.js      Play mode: mixes due reviews and new items (pure, tested)
+js/drill.js     Difficult drill planner: re-teach, tell-apart, tests (pure, tested)
 js/ui.js        rendering helpers (cards, furigana, multiple-choice options)
 js/analytics.js aggregations for the Stats view (pure, tested)
 js/charts.js    dependency-free SVG charts (stacked bars, lines, tooltips)

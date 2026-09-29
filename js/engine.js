@@ -18,6 +18,12 @@
 //    kanji and word, first unlocked first learned.
 //  * Typing a word correctly in a sentence review also counts as a review of
 //    that word (see creditWord).
+//  * A word or kanji answered "Again" twice in a row in reviews becomes
+//    Difficult: it leaves normal reviews for the Difficult drill until a clean
+//    drill graduates it (due again in 1 day, on probation). Two misses in a
+//    row on a sentence flag the word it tests.
+//  * Mix-ups (a wrong pick or typed answer that is another word) are recorded
+//    as pairs in state.confusions.
 
 import { answer as srsAnswer, introduce, newCard, DEFAULT_SRS, HARD, DAY } from './srs.js';
 
@@ -130,13 +136,15 @@ export function stats(course, state, now = Date.now()) {
     if (card) {
       if (card.passedFinal) b.known++;
       else b.learning++;
-      if (card.due <= now) s.due++;
+      if (card.difficult) s.difficult = (s.difficult || 0) + 1;
+      else if (card.due <= now) s.due++;
     } else if (inQueue.has(item.id)) b.queued++;
   }
   const t = state.days[dayKey(now)] || { learned: 0, reviews: 0 };
   s.learnedToday = t.learned;
   s.reviewsToday = t.reviews;
   s.playedToday = t.learned + t.reviews; // every card answered or learned today
+  s.difficult ||= 0;
   s.newLeftToday = Math.max(0, state.settings.newPerDay - t.learned);
   s.streak = streak(state, now);
   return s;
@@ -188,14 +196,119 @@ export function completeLearning(course, state, ids, now = Date.now()) {
   return state;
 }
 
+// Cards due for normal review (Difficult cards wait for the drill instead).
 export function dueCards(state, now = Date.now()) {
-  return Object.values(state.cards).filter((c) => c.due <= now).sort((a, b) => a.due - b.due);
+  return Object.values(state.cards).filter((c) => !c.difficult && c.due <= now).sort((a, b) => a.due - b.due);
 }
 
 export function nextDueTime(state) {
   let min = Infinity;
-  for (const c of Object.values(state.cards)) min = Math.min(min, c.due);
+  for (const c of Object.values(state.cards)) if (!c.difficult) min = Math.min(min, c.due);
   return min;
+}
+
+// ---------------------------------------------------------------- Difficult
+
+const FLAGGABLE = new Set(['word', 'char']);
+
+export function difficultCards(state) {
+  return Object.values(state.cards).filter((c) => c.difficult).sort((a, b) => a.difficult.since - b.difficult.since);
+}
+
+function flag(state, id, now) {
+  const card = state.cards[id];
+  if (!card || card.difficult) return null;
+  state.cards[id] = { ...card, difficult: { since: now }, failStreak: 0, probation: false };
+  return id;
+}
+
+// Manual mark / unmark from the item page.
+export function markDifficult(course, state, id, on, now = Date.now()) {
+  const card = state.cards[id];
+  if (!card || !FLAGGABLE.has(course.items.get(id)?.kind)) return false;
+  if (on) return !!flag(state, id, now);
+  state.cards[id] = { ...card, difficult: null, failStreak: 0, due: Math.min(card.due, now + DAY) };
+  return true;
+}
+
+// A clean drill: back to normal reviews, due in 1 day, on probation (one more
+// miss in a normal review flags it again at once).
+export function graduateDifficult(state, id, now = Date.now()) {
+  const card = state.cards[id];
+  if (!card?.difficult) return false;
+  state.cards[id] = {
+    ...card, difficult: null, probation: true, failStreak: 0,
+    state: 'review', step: 0, ivl: 1, due: now + DAY,
+  };
+  return true;
+}
+
+// Drill answers are tallied apart from reviews so they don't move the review success rate.
+export function recordDrill(state, ok, now = Date.now()) {
+  const t = today(state, now);
+  t.drill ||= [0, 0];
+  t.drill[ok ? 0 : 1]++;
+}
+
+// Update the fail streak after a review and flag if needed. Returns the flagged id.
+function trackFailures(course, state, item, prev, rating, now) {
+  const card = state.cards[item.id];
+  if (rating !== 1) {
+    state.cards[item.id] = { ...card, failStreak: 0, probation: false };
+    return null;
+  }
+  const streak = (prev.failStreak || 0) + 1;
+  state.cards[item.id] = { ...card, failStreak: streak };
+  if (item.kind === 'cloze') {
+    if (streak < 2) return null;
+    state.cards[item.id].failStreak = 0;
+    return flag(state, item.wordId, now);
+  }
+  if (!FLAGGABLE.has(item.kind)) return null;
+  if (prev.probation || streak >= 2) return flag(state, item.id, now);
+  return null;
+}
+
+// ---------------------------------------------------------------- mix-ups
+
+const pairKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+const baseId = (course, id) => {
+  const item = course.items.get(id);
+  return item?.kind === 'cloze' ? item.wordId : id;
+};
+
+// Record that `a` was answered with `b` (either order). Sentences map to their word.
+export function recordConfusion(course, state, a, b, now = Date.now()) {
+  const x = baseId(course, a);
+  const y = baseId(course, b);
+  if (!x || !y || x === y) return null;
+  if (!FLAGGABLE.has(course.items.get(x)?.kind) || !FLAGGABLE.has(course.items.get(y)?.kind)) return null;
+  state.confusions ||= {};
+  const k = pairKey(x, y);
+  const c = state.confusions[k] || { n: 0, last: 0 };
+  state.confusions[k] = { n: c.n + 1, last: now };
+  return k;
+}
+
+// Words you've actually confused with `id`, most often first: [{ id, n }].
+export function confusedWith(state, id) {
+  const out = [];
+  for (const [k, { n }] of Object.entries(state.confusions || {})) {
+    const [a, b] = k.split('|');
+    if (a === id) out.push({ id: b, n });
+    else if (b === id) out.push({ id: a, n });
+  }
+  return out.sort((p, q) => q.n - p.n);
+}
+
+// Likely mix-up partners: recorded ones first, then predicted look/sound-alikes
+// you have already learned (`learnedOnly`).
+export function partnersOf(course, state, id, { limit = 4, learnedOnly = true } = {}) {
+  const ids = confusedWith(state, id).map((p) => p.id);
+  for (const s of course.items.get(id)?.sim || []) {
+    if (!ids.includes(s) && (!learnedOnly || state.cards[s])) ids.push(s);
+  }
+  return ids.slice(0, limit);
 }
 
 export function stageOf(course, card) {
@@ -297,6 +410,7 @@ export function review(course, state, id, rating, now = Date.now(), { typed = fa
   const stage = stageOf(course, prev);
   const res = srsAnswer(prev, rating, now, item.stages.length, srsConfig(state));
   state.cards[id] = res.card;
+  const flagged = trackFailures(course, state, item, prev, rating, now);
   const t = today(state, now);
   t.reviews++;
   const failed = rating === 1 ? 1 : 0;
@@ -316,7 +430,7 @@ export function review(course, state, id, rating, now = Date.now(), { typed = fa
     else if (item.kind === 'cloze') unlocked = unlockNextSentence(course, state, item.wordId, now);
   }
   const credited = item.kind === 'cloze' && typed ? creditWord(course, state, item.wordId, rating, now) : null;
-  return { ...res, unlocked, credited };
+  return { ...res, card: state.cards[id], unlocked, credited, flagged };
 }
 
 // Anki's maturity buckets: still in learning steps, young (< 21d), mature.
@@ -330,6 +444,8 @@ export function reconcile(course, state, now = Date.now()) {
   state.settings = { ...DEFAULT_SETTINGS, ...state.settings };
   state.unlocked ||= {};
   state.days ||= {};
+  state.confusions ||= {};
+  state.notes ||= {};
   state.cards = Object.fromEntries(Object.entries(state.cards).filter(([id]) => course.items.has(id)));
   state.queue = state.queue.filter((id) => course.items.has(id) && !state.cards[id]);
   const queued = new Set(state.queue);
@@ -337,7 +453,14 @@ export function reconcile(course, state, now = Date.now()) {
     if (id.startsWith('w:')) state.unlocked[id] ||= now;
     if (!state.cards[id] && !queued.has(id)) state.queue.push(id);
   }
-  state.version = 3;
+  state.version = 4;
+  // one-time: words / kanji failing right now after 2+ lapses go straight to the drill
+  if (!state.difficultSeeded) {
+    for (const card of Object.values(state.cards)) {
+      if (card.state === 'relearning' && card.lapses >= 2 && FLAGGABLE.has(course.items.get(card.id)?.kind)) flag(state, card.id, now);
+    }
+    state.difficultSeeded = true;
+  }
   unlockWords(course, state, now);
   // one queued sentence per word at most (older versions queued them all)
   const allowed = new Set();
@@ -359,6 +482,7 @@ export function reconcile(course, state, now = Date.now()) {
 // Status of any item for browsing.
 export function itemStatus(state, id) {
   const card = state.cards[id];
+  if (card?.difficult) return 'difficult';
   if (card) return card.passedFinal ? 'known' : 'learning';
   if (state.queue.includes(id)) return 'queued';
   return 'locked';

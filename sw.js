@@ -1,10 +1,10 @@
 // Service worker: precache the app shell and the N5 data so the app works
 // offline. Bump VERSION when the list of files changes.
-const VERSION = 'v4';
+const VERSION = 'v5';
 const CACHE = `jlpt-prep-${VERSION}`;
 const ASSETS = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
-  'js/app.js', 'js/engine.js', 'js/srs.js', 'js/session.js', 'js/kana.js', 'js/store.js', 'js/ui.js', 'js/analytics.js', 'js/charts.js', 'js/play.js',
+  'js/app.js', 'js/engine.js', 'js/srs.js', 'js/session.js', 'js/kana.js', 'js/store.js', 'js/ui.js', 'js/analytics.js', 'js/charts.js', 'js/play.js', 'js/drill.js',
   'data/n5/characters.json', 'data/n5/words.json', 'data/n5/sentences.json',
   'data/n5/grammar.json', 'data/n5/kana.json', 'data/n5/meta.json',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png',

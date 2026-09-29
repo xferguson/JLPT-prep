@@ -145,32 +145,92 @@ function poolFor(course, item, stage) {
 }
 
 // Options for "form -> meaning" (recognize) or "meaning -> form" (recall).
-export function choiceOptions(course, item, stage, direction) {
+// `prefer`: item ids to use as wrong answers first (look-alikes / mix-ups).
+// `idOf` maps each option's text back to its item, to record mix-ups.
+export function choiceOptions(course, item, stage, direction, { prefer = [] } = {}) {
   const pool = poolFor(course, item, stage);
   const textOf = direction === 'recognize' ? glossOf : (x) => formAt(x, stage);
   const correct = textOf(item);
-  return { correct, options: shuffle([correct, ...pickDistractors(item, pool, textOf)]) };
+  const idOf = { [correct]: item.id };
+  const inPool = new Set(pool.map((x) => x.id));
+  const chosen = [];
+  for (const id of prefer) {
+    const x = course.items.get(id);
+    const t = x && inPool.has(id) ? textOf(x) : null;
+    if (!t || idOf[t] || chosen.length >= 3) continue;
+    idOf[t] = id;
+    chosen.push(t);
+  }
+  const fill = pickDistractors(item, pool.filter((x) => !(textOf(x) in idOf)), textOf, 3 - chosen.length);
+  for (const t of fill) idOf[t] = pool.find((x) => textOf(x) === t)?.id;
+  return { correct, options: shuffle([correct, ...chosen, ...fill]), idOf };
 }
 
 // Options for a cloze: other cloze answers that look alike (length, script, ending).
-export function clozeOptions(course, cloze) {
+export function clozeOptions(course, cloze, { prefer = [] } = {}) {
   const a = cloze.answer;
+  const idOf = { [a]: cloze.id };
+  // look-alike words first: an answer taken from one of their sentences
+  const preferred = [];
+  for (const wid of prefer) {
+    const z = (course.clozesByWord.get(wid) || []).find((c) => !(c.answer in idOf));
+    if (z && preferred.length < 3) {
+      idOf[z.answer] = z.id;
+      preferred.push(z.answer);
+    }
+  }
   const score = (b) => Math.abs(b.length - a.length) * 2
     + (hasKanji(b) !== hasKanji(a) ? 3 : 0)
     + (kataToHira(b.slice(-1)) !== kataToHira(a.slice(-1)) ? 1 : 0) + Math.random() * 2;
-  const seen = new Set([a]);
+  const seen = new Set(Object.keys(idOf));
   const cands = [];
+  const idByAnswer = {};
   for (const it of course.items.values()) {
     if (it.kind !== 'cloze' || it.wordId === cloze.wordId || seen.has(it.answer)) continue;
     seen.add(it.answer);
     cands.push(it.answer);
+    idByAnswer[it.answer] = it.id;
   }
   const picks = cands.map((b) => [score(b), b]).sort((x, y) => x[0] - y[0]).slice(0, 12).map((x) => x[1]);
-  return { correct: a, options: shuffle([a, ...shuffle(picks).slice(0, 3)]) };
+  const fill = shuffle(picks).slice(0, 3 - preferred.length);
+  for (const t of fill) idOf[t] = idByAnswer[t];
+  return { correct: a, options: shuffle([a, ...preferred, ...fill]), idOf };
+}
+
+// `a` with the characters that differ from `b` highlighted (longest common
+// subsequence), e.g. おば<mark>あ</mark>さん against おばさん.
+export function diffHighlight(a, b) {
+  const n = a.length;
+  const m = b.length;
+  const L = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  }
+  let out = '';
+  let i = 0;
+  let j = 0;
+  while (i < n) {
+    if (j < m && a[i] === b[j]) {
+      out += esc(a[i]);
+      i++;
+      j++;
+    } else if (j < m && L[i][j + 1] >= L[i + 1][j]) j++;
+    else {
+      out += `<mark>${esc(a[i])}</mark>`;
+      i++;
+    }
+  }
+  return out.replace(/<\/mark><mark>/g, '');
+}
+
+// Each N5 kanji in a word: [{ char, meanings, kana, id }].
+export function kanjiBreakdown(course, item) {
+  const chars = item.kind === 'char' ? [] : [...new Set([...item.written])];
+  return chars.map((c) => course.charByValue.get(c)).filter(Boolean);
 }
 
 export function statusBadge(status) {
-  const label = { known: 'Known', learning: 'Learning', queued: 'Queued', locked: 'Locked' }[status];
+  const label = { known: 'Known', learning: 'Learning', difficult: 'Difficult', queued: 'Queued', locked: 'Locked' }[status];
   return `<span class="status status-${status}">${label}</span>`;
 }
 

@@ -1,7 +1,10 @@
 import {
   buildCourse, initialState, reconcile, stats, nextNewItems, completeLearning, dueCards,
   nextDueTime, review, reviewView, itemStatus, knownChars, DEFAULT_SETTINGS,
+  difficultCards, markDifficult, graduateDifficult, recordDrill, recordConfusion, confusedWith, partnersOf,
+  sentencesOf,
 } from './engine.js';
+import { DrillSession, DRILL_TESTS } from './drill.js';
 import { preview, formatInterval, AGAIN, HARD, GOOD, EASY, DEFAULT_SRS } from './srs.js';
 import { LearningSession } from './session.js';
 import { PlaySession } from './play.js';
@@ -14,6 +17,7 @@ import { romajiToKana, normalizeAnswer, kataToHira } from './kana.js';
 import {
   esc, kindLabel, formHtml, glossOf, stageLabel, isKanaChar, detailsHtml,
   sentenceHtml, choiceOptions, clozeOptions, statusBadge, speak, speechTextOf,
+  diffHighlight, kanjiBreakdown,
 } from './ui.js';
 
 const LEVEL = 'N5';
@@ -24,6 +28,7 @@ let keyHandler = null; // keyboard shortcuts for the current screen
 let learn = null; // active LearningSession
 let reviewRun = null; // { done, again, startedAt }
 let play = null; // active PlaySession
+let drill = null; // active DrillSession
 
 // ------------------------------------------------------------------ boot
 
@@ -133,7 +138,7 @@ function route({ keepScroll = false } = {}) {
   const [page, arg] = hash.split('/');
   const tab = page || 'home';
   document.querySelectorAll('.tabbar a').forEach((a) => {
-    const active = a.dataset.tab === ({ item: 'browse', play: 'home' }[tab] || tab);
+    const active = a.dataset.tab === ({ item: 'browse', play: 'home', difficult: 'review', drill: 'review' }[tab] || tab);
     a.classList.toggle('active', active);
     if (active) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
@@ -141,12 +146,15 @@ function route({ keepScroll = false } = {}) {
   if (tab !== 'learn') learn = null;
   if (tab !== 'review') reviewRun = null;
   if (tab !== 'play') play = null;
+  if (tab !== 'drill') drill = null;
   if (!keepScroll) window.scrollTo(0, 0);
   if (['home', 'stats', 'review'].includes(tab)) setTimeout(() => { lastSignature = idleScreen() ? screenSignature(tab) : ''; });
   switch (tab) {
     case 'learn': return renderLearn();
     case 'review': return renderReview();
     case 'play': return renderPlay(arg);
+    case 'difficult': return renderDifficult();
+    case 'drill': return renderDrill(arg ? decodeURIComponent(arg) : null);
     case 'browse': return renderBrowse(arg || 'characters');
     case 'item': return renderItem(decodeURIComponent(arg || ''));
     case 'settings': return renderSettings();
@@ -196,6 +204,7 @@ function renderHome() {
       <div class="play-buttons">${[...new Set([10, state.settings.playSize, 50])].sort((a, b) => a - b)
     .map((n) => `<a class="btn ${n === state.settings.playSize ? 'btn-primary' : ''}" href="#/play/${n}">Play ${n}</a>`).join('')}</div>
     </section>
+    ${s.difficult ? `<a class="difficult-banner" href="#/difficult"><b>${s.difficult}</b> Difficult word${s.difficult === 1 ? '' : 's'} waiting for a drill <span aria-hidden="true">→</span></a>` : ''}
     <section class="actions">
       <a class="btn ${s.due ? 'btn-primary' : 'btn-muted'}" href="#/review">${s.due ? `Review ${s.due}` : `No reviews due${nd < Infinity ? ` · next ${whenText(nd)}` : ''}`}</a>
       <a class="btn ${s.due ? '' : 'btn-primary'}" href="#/learn">Learn new</a>
@@ -372,9 +381,9 @@ function grammarTags(sentence) {
 }
 
 // Multiple choice. direction: recognize (form -> gloss) | recall (gloss -> form)
-function mcView(head, item, direction) {
-  const stage = item.stages[0];
-  const { correct, options } = choiceOptions(course, item, stage, direction);
+// A wrong pick is recorded as a mix-up between the two words.
+function mcView(head, item, direction, { stage = item.stages[0], prefer = [], done = nextLearn } = {}) {
+  const { correct, options, idOf } = choiceOptions(course, item, stage, direction, { prefer });
   const promptHtml = direction === 'recognize'
     ? `<div class="prompt">${formHtml(item, stage, 'big')}</div><p class="question">${isKanaChar(item) ? 'Which romaji is this?' : 'What does this mean?'}</p>`
     : `<div class="prompt"><span class="gloss big">${esc(glossOf(item))}</span></div><p class="question">Pick the ${esc(stageLabel(item, stage).toLowerCase())}</p>`;
@@ -393,13 +402,16 @@ function mcView(head, item, direction) {
       b.disabled = true;
       if (b.dataset.v === correct) b.classList.add('correct');
     });
-    if (!ok) btn.classList.add('wrong');
+    if (!ok) {
+      btn.classList.add('wrong');
+      noteConfusion(item.id, idOf[btn.dataset.v]);
+    }
     maybeAutoplay(item);
     const fb = app.querySelector('#feedback');
     fb.innerHTML = `${ok ? '' : `<div class="details-wrap">${detailsHtml(item, { highlightStage: stage })}</div>`}
       <div class="card-actions">${audioBtn(item)}<button class="btn btn-primary" id="go">Continue</button></div>`;
     bindAudio();
-    const go = () => nextLearn(ok);
+    const go = () => done(ok);
     on('#go', 'click', go);
     app.querySelector('#go').focus();
     keyHandler = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } };
@@ -445,7 +457,7 @@ function flashcard(head, item, stage, direction, { ratingsHtml, onRate, badge = 
   render(`${head}<section class="card flashcard">
     <div class="card-meta"><span class="pill">${esc(label)}</span>${badge}</div>
     ${front}
-    <div id="back" hidden>${back}<div class="details-wrap">${detailsHtml(item, { highlightStage: stage })}</div></div>
+    <div id="back" hidden>${back}<div class="details-wrap">${detailsHtml(item, { highlightStage: stage })}</div>${noteHtml(item.id)}</div>
     <div id="controls" class="card-actions"><button class="btn btn-primary" id="show">Show answer <kbd>space</kbd></button></div>
   </section>`);
   const reveal = () => {
@@ -472,7 +484,7 @@ function clozeView(head, item, mode, done, { card = null } = {}) {
   const known = knownChars(course, state);
   const furigana = state.settings.furigana ? 'unknown' : 'off';
   const hint = `<p class="translation">${esc(s.en)}</p>`;
-  const opts = mode === 'mc' ? clozeOptions(course, item) : null;
+  const opts = mode === 'mc' ? clozeOptions(course, item, { prefer: partnersOf(course, state, item.wordId, { learnedOnly: false }) }) : null;
   render(`${head}<section class="card cloze">
     <p class="eyebrow">Fill in the blank</p>
     ${sentenceHtml(s, { span: item.span, mode: 'blank', furigana, known })}
@@ -492,6 +504,11 @@ function clozeView(head, item, mode, done, { card = null } = {}) {
   const finish = (ok, given) => {
     if (answered) return;
     answered = true;
+    if (!ok && given) {
+      // picked or typed another word: that's a mix-up worth remembering
+      if (mode === 'mc') noteConfusion(item.id, opts.idOf[given]);
+      else for (const other of wordsReadAs(given)) noteConfusion(item.id, other);
+    }
     if (mode === 'mc') {
       app.querySelectorAll('.option').forEach((b) => {
         b.disabled = true;
@@ -639,6 +656,10 @@ function announce(item, res) {
   } else if (res.passedFinalFirst && item.kind === 'char') {
     msgs.push(`<b lang="ja">${esc(item.char)}</b> learned!`);
   }
+  if (res.flagged) {
+    const f = course.items.get(res.flagged);
+    msgs.push(`Marked <b lang="ja">${esc(f.char || f.display)}</b> Difficult — moved to your <a href="#/difficult">Difficult drill</a>`);
+  }
   if (res.credited) {
     const word = course.items.get(res.credited.wordId);
     msgs.push(`Typed it — counts as a review of <b lang="ja">${esc(word.display)}</b> too (next ${whenText(res.credited.due)})`);
@@ -722,6 +743,363 @@ function finishPlay() {
   updateBadge();
 }
 
+// ------------------------------------------------------------------ Difficult words & mix-ups
+
+function noteConfusion(a, b) {
+  if (b && recordConfusion(course, state, a, b)) persist();
+}
+
+// Words whose kana (or written form) is exactly this answer.
+let readingIndex;
+function wordsReadAs(text) {
+  if (!readingIndex) {
+    readingIndex = new Map();
+    for (const w of course.words) {
+      for (const f of [w.kana, w.written]) {
+        const k = normalizeAnswer(f);
+        if (!readingIndex.has(k)) readingIndex.set(k, new Set());
+        readingIndex.get(k).add(w.id);
+      }
+    }
+  }
+  return [...(readingIndex.get(normalizeAnswer(text)) || [])];
+}
+
+function noteHtml(id) {
+  const note = state.notes?.[id];
+  return note ? `<div class="note"><span class="detail-label">Your note</span><p>${esc(note)}</p></div>` : '';
+}
+
+function noteEditor(id) {
+  return `<label class="note-edit"><span class="detail-label">Your note / mnemonic</span>
+    <textarea id="note" rows="2" placeholder="e.g. はし with a high start = chopsticks…">${esc(state.notes?.[id] || '')}</textarea></label>`;
+}
+
+function bindNoteEditor(id) {
+  const ta = app.querySelector('#note');
+  if (!ta) return;
+  let t;
+  ta.addEventListener('input', () => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      state.notes ||= {};
+      if (ta.value.trim()) state.notes[id] = ta.value.trim();
+      else delete state.notes[id];
+      persist();
+    }, 400);
+  });
+}
+
+function hasJapaneseVoice() {
+  try {
+    return 'speechSynthesis' in window && speechSynthesis.getVoices().some((v) => v.lang?.toLowerCase().startsWith('ja'));
+  } catch {
+    return false;
+  }
+}
+
+const itemLabelOf = (it) => (it.kind === 'char' ? it.char : it.kind === 'word' ? it.display : it.answer);
+
+function mixupChips(id) {
+  const list = confusedWith(state, id).slice(0, 4);
+  if (!list.length) return '';
+  return `<div class="chips">${list.map(({ id: other, n }) => `<a class="chip chip-word" lang="ja" href="#/item/${encodeURIComponent(other)}">${esc(itemLabelOf(course.items.get(other)))} <small>×${n}</small></a>`).join('')}</div>`;
+}
+
+function renderDifficult() {
+  const cards = difficultCards(state);
+  render(`<h1 class="page-title">Difficult</h1>
+    <section class="panel">
+      <p class="muted small">A word or kanji you answer <b>Again</b> twice in a row (or a sentence you miss twice in a row) lands here and leaves your normal reviews.
+      The drill re-teaches it, tests it four ways, and works through any words you mix it up with. Pass every test without a miss and it goes back to normal reviews, due in 1 day.</p>
+      ${cards.length ? `<div class="actions"><a class="btn btn-primary" href="#/drill">Start drill (${Math.min(10, cards.length)})</a></div>` : ''}
+    </section>
+    ${cards.length ? `<section class="panel"><ul class="list difficult-list">${cards.map((c) => {
+    const it = course.items.get(c.id);
+    const mix = confusedWith(state, c.id);
+    return `<li><a href="#/item/${encodeURIComponent(c.id)}">
+        <span class="w-jp jp" lang="ja">${esc(itemLabelOf(it))}${it.kind === 'word' && it.written !== it.kana ? `<small>${esc(it.kana)}</small>` : ''}</span>
+        <span class="w-en">${esc(glossOf(it))}<br><small class="muted">${c.lapses} lapse${c.lapses === 1 ? '' : 's'}${mix.length ? ` · mixed up with <span lang="ja">${mix.slice(0, 3).map((m) => esc(itemLabelOf(course.items.get(m.id)))).join('、')}</span>` : ''}</small></span></a></li>`;
+  }).join('')}</ul></section>`
+    : '<section class="panel center"><p class="muted">No difficult words right now. 🎉</p><a class="btn" href="#/">Home</a></section>'}`);
+}
+
+// arg: null (drill up to 10 Difficult items) or "group:<id>" (tell-apart only)
+function renderDrill(arg) {
+  if (!drill) {
+    const groupId = arg?.startsWith('group:') ? arg.slice(6) : null;
+    const items = groupId ? [course.items.get(groupId)].filter(Boolean)
+      : difficultCards(state).slice(0, 10).map((c) => course.items.get(c.id));
+    if (!items.length) {
+      location.hash = '#/difficult';
+      return;
+    }
+    const partners = new Map();
+    for (const it of items) {
+      const ids = groupId ? partnersOf(course, state, it.id, { limit: 3 }) : confusedWith(state, it.id).slice(0, 3).map((p) => p.id);
+      partners.set(it.id, ids.map((id) => course.items.get(id)).filter(Boolean));
+    }
+    drill = new DrillSession(items, { partners, listen: hasJapaneseVoice(), groupOnly: !!groupId });
+    Object.assign(drill, { groupOnly: !!groupId, graduated: [], stays: [] });
+  }
+  drillStep();
+}
+
+function drillStageOf(item) {
+  const card = state.cards[item.id];
+  return card ? item.stages[Math.min(card.stage, item.stages.length - 1)] : item.stages.at(-1);
+}
+
+function drillStep() {
+  const step = drill.next();
+  if (!step) return finishDrill();
+  const { item, view } = step;
+  const head = `<div class="session-head">
+      <span class="pill pill-difficult">${drill.groupOnly ? 'Tell apart' : 'Difficult'}</span>
+      <div class="bar thin"><span class="seg seg-learning" style="width:${Math.round(drill.progress * 100)}%"></span></div>
+      <a class="close" href="${drill.groupOnly ? `#/item/${encodeURIComponent(item.id)}` : '#/difficult'}" aria-label="End drill">✕</a>
+    </div>`;
+  const done = (ok) => drillResult(ok, step);
+  const stage = drillStageOf(item);
+  const prefer = partnersOf(course, state, item.id, { learnedOnly: false, limit: 3 });
+  if (view === 'reteach') return reteachView(head, item, done);
+  if (view === 'contrast') return contrastView(head, item, drill.tell.get(item.id).group, done);
+  if (view === 'tellapart') return tellApartView(head, step, done);
+  if (view === 'mc-recognize' || view === 'mc-recall') {
+    return mcView(head, item, view === 'mc-recognize' ? 'recognize' : 'recall', { stage, prefer, done });
+  }
+  if (view === 'type-recall') return typeRecallView(head, item, done);
+  if (view === 'listen') return listenView(head, item, stage, prefer, done);
+  return done(true);
+}
+
+function drillResult(ok, step) {
+  if (DRILL_TESTS.includes(step.view)) recordDrill(state, ok);
+  const fin = drill.result(ok);
+  if (fin && !drill.groupOnly) {
+    if (fin.clean && graduateDifficult(state, fin.item.id)) {
+      drill.graduated.push(fin.item);
+      toast(`<b lang="ja">${esc(itemLabelOf(fin.item))}</b> graduated — back in normal reviews tomorrow`, 2500);
+    } else drill.stays.push(fin.item);
+  }
+  persist();
+  drillStep();
+}
+
+function continueButton(done, ok = true) {
+  const go = () => done(ok);
+  on('#go', 'click', go);
+  app.querySelector('#go')?.focus();
+  keyHandler = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } };
+}
+
+function reteachView(head, item, done) {
+  const z = item.kind === 'word' ? sentencesOf(course, item.id)[0] : null;
+  const sentence = z ? course.sentenceById.get(z.sentenceId) : null;
+  const kanji = kanjiBreakdown(course, item);
+  const usedIn = item.kind === 'char'
+    ? course.words.filter((w) => w.req.includes(item.char)).sort((a, b) => (state.cards[b.id] ? 1 : 0) - (state.cards[a.id] ? 1 : 0) || a.rank - b.rank).slice(0, 4)
+    : [];
+  const mix = mixupChips(item.id);
+  render(`${head}<section class="card">
+    <p class="eyebrow">Let's look at this one again</p>
+    ${heroOf(item)}
+    ${detailsHtml(item)}
+    ${kanji.length ? `<div class="kanji-breakdown">${kanji.map((k) => `<div><span class="jp big-k" lang="ja">${esc(k.char)}</span><span>${esc(k.meanings.join(', '))}<br><small class="jp muted" lang="ja">${esc(k.kana)}</small></span></div>`).join('')}</div>` : ''}
+    ${usedIn.length ? `<p class="small muted">Used in: <span lang="ja">${usedIn.map((w) => esc(w.display)).join('、')}</span></p>` : ''}
+    ${sentence ? `<div class="reteach-sentence">${sentenceHtml(sentence, { span: z.span, mode: 'highlight', furigana: 'all' })}<p class="translation">${esc(sentence.en)}</p></div>` : ''}
+    ${mix ? `<p class="small muted">You've mixed this up with:</p>${mix}` : ''}
+    ${noteEditor(item.id)}
+    <div class="card-actions">${audioBtn(item)}<button class="btn btn-primary" id="go">Test me</button></div>
+  </section>`);
+  bindAudio();
+  bindNoteEditor(item.id);
+  maybeAutoplay(item);
+  continueButton(done);
+  // typing in the note shouldn't trigger Continue
+  app.querySelector('#note')?.addEventListener('keydown', (e) => e.stopPropagation());
+}
+
+function contrastView(head, item, group, done) {
+  const kanaOf = (it) => (it.kind === 'char' ? it.kana.split(', ')[0] : it.kana);
+  // the drilled word is compared with its closest-sounding partner; partners with it
+  const closeness = (a, b) => diffHighlight(a, b).split('<mark>').length;
+  const closest = group.slice(1).sort((a, b) => closeness(kanaOf(item), kanaOf(a)) - closeness(kanaOf(item), kanaOf(b)))[0];
+  const col = (it) => {
+    const vs = it === item ? closest : item;
+    const k = kanaOf(it);
+    const same = it !== item && it.kind === 'word' && k === kanaOf(item);
+    return `<div class="contrast-col">
+      <div class="jp contrast-kana" lang="ja">${it.kind === 'char' ? esc(it.char) : diffHighlight(k, kanaOf(vs))}</div>
+      ${same ? '<div class="small same-sound">same sound — tell by kanji &amp; meaning</div>' : ''}
+      ${it.kind === 'word' && it.written !== it.kana ? `<div class="jp muted" lang="ja">${esc(it.written)}</div>` : ''}
+      ${it.kind === 'char' ? `<div class="jp muted small" lang="ja">${esc(it.kana)}</div>` : ''}
+      <div class="contrast-meaning">${esc(glossOf(it))}</div>
+      ${audioBtn(it)}
+    </div>`;
+  };
+  render(`${head}<section class="card">
+    <p class="eyebrow">Don't mix these up</p>
+    <div class="contrast">${group.map(col).join('')}</div>
+    <p class="small muted">The highlighted sounds are what's different. Play each one and say it out loud.</p>
+    <div class="card-actions"><button class="btn btn-primary" id="go">Tell them apart</button></div>
+  </section>`);
+  bindAudio();
+  continueButton(done);
+}
+
+function tellApartView(head, step, done) {
+  const { group, target } = step;
+  const t = drill.tell.get(step.item.id);
+  const modes = ['meaning', 'reading', ...(hasJapaneseVoice() ? ['audio'] : [])];
+  const mode = modes[t.rounds % modes.length];
+  const label = (it) => (it.kind === 'char' ? esc(it.char) : `${esc(it.display)}${it.written !== it.kana ? ` <small>${esc(it.kana)}</small>` : ''}`);
+  const prompt = mode === 'meaning' ? `<p class="question">Which one means…</p><div class="prompt"><span class="gloss big">${esc(glossOf(target))}</span></div>`
+    : mode === 'reading' ? `<p class="question">What does this mean?</p><div class="prompt"><span class="jp big" lang="ja">${esc(target.kana)}</span></div>`
+      : `<p class="question">Which one did you hear?</p><div class="prompt"><button class="icon-btn audio big-audio" data-say="${esc(speechTextOf(target, course))}" aria-label="Play again">🔊</button></div>`;
+  const order = [...group].sort((a, b) => a.id.localeCompare(b.id));
+  const opt = (it, i) => (mode === 'reading'
+    ? `<button class="option" data-id="${esc(it.id)}"><kbd>${i + 1}</kbd>${esc(glossOf(it))}</button>`
+    : `<button class="option jp" lang="ja" data-id="${esc(it.id)}"><kbd>${i + 1}</kbd>${label(it)}</button>`);
+  render(`${head}<section class="card">
+    <p class="eyebrow">Tell apart · round ${t.rounds + 1}</p>
+    ${prompt}
+    <div class="options">${order.map(opt).join('')}</div>
+    <div id="feedback"></div>
+  </section>`);
+  bindAudio();
+  if (mode === 'audio') speak(speechTextOf(target, course));
+  let answered = false;
+  const choose = (btn) => {
+    if (answered) return;
+    answered = true;
+    const ok = btn.dataset.id === target.id;
+    app.querySelectorAll('.option').forEach((b) => {
+      b.disabled = true;
+      if (b.dataset.id === target.id) b.classList.add('correct');
+    });
+    if (!ok) {
+      btn.classList.add('wrong');
+      noteConfusion(target.id, btn.dataset.id);
+    }
+    app.querySelector('#feedback').innerHTML = `${ok ? '' : `<p class="small">That was <b lang="ja">${esc(itemLabelOf(target))}</b> — ${esc(glossOf(target))}</p>`}
+      <div class="card-actions">${audioBtn(target)}<button class="btn btn-primary" id="go">Continue</button></div>`;
+    bindAudio();
+    continueButton(done, ok);
+    if (ok) setTimeout(() => { if (app.querySelector('#go')) app.querySelector('#go').click(); }, 600);
+  };
+  on('.option', 'click', (e) => choose(e.currentTarget));
+  keyHandler = (e) => {
+    const btns = app.querySelectorAll('.option');
+    const n = Number(e.key);
+    if (n >= 1 && n <= btns.length) choose(btns[n - 1]);
+  };
+}
+
+// Meaning -> type the reading yourself (romaji converts to kana as you type).
+function typeRecallView(head, item, done) {
+  const readings = item.kind === 'char' ? item.kana.split(', ') : [item.kana, ...(item.alt || [])];
+  const accept = new Set(readings.map((r) => normalizeAnswer(r)));
+  render(`${head}<section class="card">
+    <p class="question">Type the reading of</p>
+    <div class="prompt"><span class="gloss big">${esc(glossOf(item))}</span></div>
+    ${item.kind === 'char' ? `<p class="small muted">Kanji: <span class="jp" lang="ja">${esc(item.char)}</span> — any of its readings counts</p>` : ''}
+    <form id="typeform" class="type-answer" autocomplete="off">
+      <input id="typed" type="text" lang="ja" placeholder="kana or romaji" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Reading">
+      <span id="kana-preview" class="kana-preview jp" lang="ja"></span>
+      <button class="btn btn-primary" type="submit">Check</button>
+      <button class="btn btn-link" type="button" id="dunno">I don't know</button>
+    </form>
+    <div id="feedback"></div>
+  </section>`);
+  const input = app.querySelector('#typed');
+  const pv = app.querySelector('#kana-preview');
+  input.addEventListener('input', () => { pv.textContent = /[a-z]/i.test(input.value) ? romajiToKana(input.value) : ''; });
+  const finish = (given) => {
+    const ok = accept.has(normalizeAnswer(given));
+    input.disabled = true;
+    input.classList.add(ok ? 'correct' : 'wrong');
+    app.querySelectorAll('#typeform button').forEach((b) => { b.hidden = true; });
+    if (!ok && given) for (const other of wordsReadAs(given)) noteConfusion(item.id, other);
+    app.querySelector('#feedback').innerHTML = `<div class="reveal"><div class="verdict ${ok ? 'ok' : 'bad'}">${ok ? '✓ Correct' : '✗ Not quite'}</div>
+      ${detailsHtml(item, { highlightStage: 'kana' })}</div>
+      <div class="card-actions">${audioBtn(item)}<button class="btn btn-primary" id="go">Continue</button></div>`;
+    bindAudio();
+    maybeAutoplay(item);
+    continueButton(done, ok);
+  };
+  app.querySelector('#typeform').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (input.value.trim()) finish(input.value);
+  });
+  on('#dunno', 'click', () => finish(''));
+  input.focus();
+  keyHandler = null;
+}
+
+// Hear it, pick the meaning (look-alike choices).
+function listenView(head, item, stage, prefer, done) {
+  const { correct, options, idOf } = choiceOptions(course, item, stage, 'recognize', { prefer });
+  const say = speechTextOf(item, course);
+  render(`${head}<section class="card">
+    <p class="question">Listen — what does it mean?</p>
+    <div class="prompt"><button class="icon-btn audio big-audio" data-say="${esc(say)}" aria-label="Play again">🔊</button></div>
+    <div class="options">${options.map((o, i) => `<button class="option" data-v="${esc(o)}"><kbd>${i + 1}</kbd>${esc(o)}</button>`).join('')}</div>
+    <div id="feedback"></div>
+  </section>`);
+  bindAudio();
+  speak(say);
+  let answered = false;
+  const choose = (btn) => {
+    if (answered) return;
+    answered = true;
+    const ok = btn.dataset.v === correct;
+    app.querySelectorAll('.option').forEach((b) => {
+      b.disabled = true;
+      if (b.dataset.v === correct) b.classList.add('correct');
+    });
+    if (!ok) {
+      btn.classList.add('wrong');
+      noteConfusion(item.id, idOf[btn.dataset.v]);
+    }
+    app.querySelector('#feedback').innerHTML = `<div class="details-wrap">${detailsHtml(item)}</div>
+      <div class="card-actions">${audioBtn(item)}<button class="btn btn-primary" id="go">Continue</button></div>`;
+    bindAudio();
+    continueButton(done, ok);
+  };
+  on('.option', 'click', (e) => choose(e.currentTarget));
+  keyHandler = (e) => {
+    const btns = app.querySelectorAll('.option');
+    const n = Number(e.key);
+    if (n >= 1 && n <= btns.length) choose(btns[n - 1]);
+  };
+}
+
+function finishDrill() {
+  const d = drill;
+  const left = difficultCards(state).length;
+  const chips = (list) => `<div class="chips center">${list.map((it) => `<a class="chip chip-word" lang="ja" href="#/item/${encodeURIComponent(it.id)}">${esc(itemLabelOf(it))}</a>`).join('')}</div>`;
+  if (d.groupOnly) {
+    const it = d.items[0];
+    render(`<section class="panel center"><h2>Practised telling them apart</h2>
+      <p class="muted">${[...d.tell.values()].map((t) => `${t.rounds} rounds`).join(', ')}</p>
+      <div class="actions"><a class="btn btn-primary" href="#/item/${encodeURIComponent(it.id)}">Back to <span lang="ja">${esc(itemLabelOf(it))}</span></a><a class="btn" href="#/">Home</a></div></section>`);
+  } else {
+    render(`<section class="panel center">
+      <h2>${d.graduated.length ? `${d.graduated.length} graduated` : 'Drill finished'}</h2>
+      ${d.graduated.length ? `<p class="muted">Back in normal reviews tomorrow:</p>${chips(d.graduated)}` : ''}
+      ${d.stays.length ? `<p class="muted">Still Difficult (a test was missed) — drill again later:</p>${chips(d.stays)}` : ''}
+      <div class="actions">
+        ${left ? `<a class="btn btn-primary" href="#/difficult" id="again">Drill again (${Math.min(10, left)})</a>` : ''}
+        <a class="btn" href="#/">Home</a>
+      </div></section>`);
+    // already on #/drill, so start the next round directly
+    on('#again', 'click', (e) => { e.preventDefault(); drill = null; renderDrill(null); });
+  }
+  drill = null;
+  keyHandler = null;
+}
+
 // ------------------------------------------------------------------ browse
 
 const BROWSE_TABS = [['characters', 'Characters'], ['words', 'Words'], ['sentences', 'Sentences'], ['grammar', 'Grammar']];
@@ -732,11 +1110,12 @@ function renderBrowse(tab) {
   const queued = new Set(state.queue);
   const status = (id) => {
     const card = state.cards[id];
+    if (card?.difficult) return 'difficult';
     if (card) return card.passedFinal ? 'known' : 'learning';
     return queued.has(id) ? 'queued' : 'locked';
   };
   const filterBar = (key, opts) => `<div class="filters">${opts.map(([v, l]) => `<button class="fchip ${browseFilters[key] === v ? 'on' : ''}" data-f="${key}" data-v="${v}">${l}</button>`).join('')}</div>`;
-  const statusOpts = [['all', 'All'], ['known', 'Known'], ['learning', 'Learning'], ['queued', 'Queued'], ['locked', 'Locked']];
+  const statusOpts = [['all', 'All'], ['known', 'Known'], ['learning', 'Learning'], ['difficult', 'Difficult'], ['queued', 'Queued'], ['locked', 'Locked']];
 
   let body = '';
   if (tab === 'characters') {
@@ -769,7 +1148,7 @@ function renderBrowse(tab) {
     const f = browseFilters.sentences;
     const clozes = [...course.items.values()].filter((i) => i.kind === 'cloze' && (f === 'all' ? status(i.id) !== 'locked' : status(i.id) === f));
     const lockedCount = [...course.items.values()].filter((i) => i.kind === 'cloze' && status(i.id) === 'locked').length;
-    body = `${filterBar('sentences', statusOpts.filter(([v]) => v !== 'locked'))}
+    body = `${filterBar('sentences', statusOpts.filter(([v]) => v !== 'locked' && v !== 'difficult'))}
       <p class="muted small">${clozes.length} sentences shown · ${lockedCount} still locked (they unlock as you learn each word).</p>
       <ul class="list sentences">${clozes.map((z) => {
     const s = course.sentenceById.get(z.sentenceId);
@@ -845,11 +1224,34 @@ function renderItem(id) {
   } else {
     main = `${heroOf(item)}${detailsHtml(item)}${stagesStrip(item, card ? card.stage : -1)}`;
   }
+  // Difficult toggle, note and mix-ups (words and kanji you've started learning)
+  let tricky = '';
+  if (item.kind !== 'cloze') {
+    const mix = confusedWith(state, id);
+    const sims = (item.sim || []).filter((x) => !mix.some((m) => m.id === x)).map((x) => course.items.get(x)).filter(Boolean);
+    const group = partnersOf(course, state, id, { limit: 3 });
+    tricky = `<section class="panel">
+      ${card ? `<div class="actions"><button class="btn ${card.difficult ? '' : 'btn-danger'}" id="toggle-difficult">${card.difficult ? 'Remove from Difficult' : 'Mark as Difficult'}</button>
+        ${card.difficult ? '<a class="btn btn-primary" href="#/drill">Drill Difficult words</a>' : ''}</div>` : ''}
+      ${noteEditor(id)}
+      <h3>Mixed up with</h3>
+      ${mix.length ? mixupChips(id) : '<p class="muted small">No mix-ups recorded yet. Picking or typing another word by mistake records one here.</p>'}
+      ${sims.length ? `<h3>Looks or sounds like</h3><div class="chips">${sims.map((x) => `<a class="chip chip-${x.kind}" lang="ja" href="#/item/${encodeURIComponent(x.id)}">${esc(itemLabelOf(x))}${x.kind === 'word' && x.written !== x.kana ? ` <small>${esc(x.kana)}</small>` : ''}</a>`).join('')}</div>` : ''}
+      ${card && group.length ? `<div class="actions"><a class="btn" href="#/drill/group:${encodeURIComponent(id)}">Drill this group (<span lang="ja">${[item, ...group.map((g) => course.items.get(g))].map((g) => esc(itemLabelOf(g))).join(' · ')}</span>)</a></div>` : ''}
+    </section>`;
+  }
   render(`<p><a href="javascript:history.back()" class="back">← Back</a></p>
     <section class="card"><div class="card-meta"><span class="pill pill-${item.kind}">${esc(kindLabel(item))}</span>${statusBadge(st)}${audioBtn(item)}</div>
     ${main}${srsInfo}</section>
+    ${tricky}
     <section class="panel">${extra}</section>`);
   bindAudio();
+  bindNoteEditor(id);
+  on('#toggle-difficult', 'click', () => {
+    markDifficult(course, state, id, !card.difficult);
+    persist();
+    renderItem(id);
+  });
 }
 
 
@@ -1096,4 +1498,4 @@ boot().catch((err) => {
 });
 
 // for debugging from the console
-window.jlpt = { get state() { return state; }, get course() { return course; } };
+window.jlpt = { get state() { return state; }, get course() { return course; }, get drill() { return drill; } };

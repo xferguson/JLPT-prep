@@ -54,6 +54,8 @@
 
 * { box-sizing: border-box; }
 
+[hidden] { display: none !important; }
+
 html { -webkit-text-size-adjust: 100%; }
 
 body {
@@ -510,3 +512,32 @@ kbd { display: none; }
 .play-buttons { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px; }
 .play-buttons .btn { white-space: nowrap; padding: 10px 8px; }
 .play-count { font-variant-numeric: tabular-nums; }
+
+/* difficult & mix-ups */
+:root { --difficult: #b3261e; }
+@media (prefers-color-scheme: dark) { :root { --difficult: #f2766c; } }
+.status-difficult { background: var(--difficult); }
+.pill-difficult { background: var(--difficult); color: #fff; }
+.difficult-banner {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding: 12px 16px;
+  border-radius: var(--radius); border: 1.5px solid var(--difficult); color: var(--text);
+  background: color-mix(in srgb, var(--difficult) 8%, var(--surface)); text-decoration: none; font-size: 15px;
+}
+.difficult-banner b { color: var(--difficult); font-size: 20px; }
+.difficult-banner span { margin-left: auto; color: var(--difficult); }
+.note { text-align: left; max-width: 440px; margin: 10px auto 0; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--learning) 12%, var(--surface)); }
+.note p { margin: 2px 0 0; }
+.note-edit { display: block; text-align: left; max-width: 440px; margin: 14px auto 0; }
+.note-edit textarea { display: block; width: 100%; margin-top: 4px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); color: var(--text); font: inherit; resize: vertical; }
+.kanji-breakdown { display: grid; gap: 6px; max-width: 440px; margin: 12px auto 0; text-align: left; }
+.kanji-breakdown > div { display: flex; gap: 12px; align-items: center; padding: 6px 10px; border-radius: 8px; background: var(--surface-2); font-size: 14px; }
+.big-k { font-size: 30px; line-height: 1; }
+.reteach-sentence { margin-top: 12px; }
+.contrast { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 8px 0 12px; }
+.contrast-col { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 8px; border: 1px solid var(--line); border-radius: 12px; }
+.contrast-kana { font-size: 28px; }
+.contrast-kana mark { background: color-mix(in srgb, var(--difficult) 25%, transparent); color: inherit; border-radius: 4px; padding: 0 1px; }
+.contrast-meaning { font-size: 14px; }
+.big-audio { font-size: 34px; min-width: 88px; min-height: 88px; border-radius: 50%; }
+.difficult-list .w-en small { font-size: 12px; }
+.same-sound { color: var(--difficult); font-weight: 600; }

@@ -123,6 +123,7 @@ export function forecast(course, state, now, n) {
     return { key: dayKey(t), char: 0, word: 0, cloze: 0, total: 0 };
   });
   for (const card of Object.values(state.cards)) {
+    if (card.difficult) continue; // waiting for the Difficult drill, not scheduled
     const i = Math.max(0, Math.floor((card.due - start.getTime()) / DAY));
     if (i >= n) continue;
     const kind = course.items.get(card.id)?.kind;
@@ -136,6 +137,7 @@ export function forecast(course, state, now, n) {
 // Soonest-due cards.
 export function upcoming(course, state, limit = 8) {
   return Object.values(state.cards)
+    .filter((c) => !c.difficult)
     .sort((a, b) => a.due - b.due)
     .slice(0, limit)
     .map((card) => ({ card, item: course.items.get(card.id), stage: stageOf(course, card), maturity: maturity(card) }));

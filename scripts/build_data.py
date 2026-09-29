@@ -119,6 +119,67 @@ FUNCTION_LEMMAS = set('''
 '''.split())
 
 
+# ---------------------------------------------------------------------------- look-alikes
+
+STOP_EN = set("""a an the to of in on at for and or be is are was it its one's someone something
+~ (e.g., etc.) etc e.g. counter for with by as from up out do does make very not no than that this
+(abbr.) (to) sb sth thing things kind""".split())
+
+
+def edit_distance(a, b):
+    d = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        prev, d[0] = d[:], i
+        for j, cb in enumerate(b, 1):
+            d[j] = min(prev[j] + 1, d[j - 1] + 1, prev[j - 1] + (ca != cb))
+    return d[-1]
+
+
+def meaning_words(text):
+    words = re.findall(r"[a-z']+", text.lower())
+    return {w for w in words if len(w) > 2 and w not in STOP_EN}
+
+
+def add_similar(words, characters, kanji_db, limit=6):
+    """`sim`: ids of likely mix-ups, strongest first.
+
+    Words: same kana (4), kana one edit apart (3), a shared N5 kanji (1.5),
+    a shared content word in the English meaning (1). Sounding alike ranks first.
+    Kanji: shared components (2 each) and a shared reading (1).
+    """
+    en = {w['id']: meaning_words(w['meaning']) for w in words}
+    kanji_of = {w['id']: {c for c in w['written'] if is_kanji(c)} if 'kanji' in w['stages'] else set() for w in words}
+    for w in words:
+        scores = []
+        for o in words:
+            if o is w or o['written'] == w['written']:
+                continue
+            s = 0
+            if o['kana'] == w['kana']:
+                s += 4
+            elif len(w['kana']) >= 2 and abs(len(o['kana']) - len(w['kana'])) <= 1 and edit_distance(w['kana'], o['kana']) == 1:
+                s += 3  # sounds almost the same: the likeliest mix-up
+            if kanji_of[w['id']] & kanji_of[o['id']]:
+                s += 1.5
+            if en[w['id']] & en[o['id']]:
+                s += 1
+            if s >= 1.5:
+                scores.append((-s, o['rank'], o['id']))
+        w['sim'] = [i for _, _, i in sorted(scores)[:limit]]
+    for c in characters:
+        rad = set(kanji_db[c['char']].get('wk_radicals') or [])
+        readings = set(c['on']) | set(c['kun'])
+        scores = []
+        for o in characters:
+            if o is c:
+                continue
+            orad = set(kanji_db[o['char']].get('wk_radicals') or [])
+            s = 2 * len(rad & orad) + (1 if readings & (set(o['on']) | set(o['kun'])) else 0)
+            if s >= 2:
+                scores.append((-s, o['rank'], o['id']))
+        c['sim'] = [i for _, _, i in sorted(scores)[:limit]]
+
+
 def main():
     try:
         from janome.tokenizer import Tokenizer
@@ -537,6 +598,8 @@ def main():
         w['sentences'] = refs
         for k in [k for k in w if k.startswith('_')]:
             del w[k]
+
+    add_similar(words, characters, kanji_db)
 
     counts = Counter(len(w['sentences']) for w in words)
     print('sentences per word:', sorted(counts.items()))
