@@ -486,6 +486,7 @@ def main():
 
     def scan():
         counts, cands = Counter(), defaultdict(list)
+        words_in = defaultdict(set)  # sentence index -> N5 word ids found in it
         for si, info in enumerate(sentence_info):
             maybe = {}
             for t in info['toks']:
@@ -497,16 +498,17 @@ def main():
             for w in maybe.values():
                 spans = find_spans(w, info['toks'], info['ja'])
                 if spans:
+                    words_in[si].add(w['id'])
                     counts[w['id']] += len(spans)
                     if info['ok']:
                         cands[w['id']].append((si, spans[0]))
-        return counts, cands
+        return counts, cands, words_in
 
     # pass 1: count kanji-written hits of "usually kana" homophones to pick owners
     for w in words:
         if w['_uk']:
             kana_owner[w['kana']] = None
-    first, _ = scan()
+    first, _, _ = scan()
     groups = defaultdict(list)
     for w in words:
         if w['_uk']:
@@ -514,7 +516,7 @@ def main():
     for kana, ws in groups.items():
         pref = [w for w in ws if w['written'] == preferred_owner.get(kana)]
         kana_owner[kana] = (pref or [max(ws, key=lambda w: first[w['id']])])[0]['id']
-    word_count, candidates = scan()
+    word_count, candidates, words_in = scan()
 
     # ---------------------------------------------------------------- word frequency
     total_tok = sum(len(t) for t in tokens)
@@ -593,7 +595,10 @@ def main():
                     else:
                         toks.append([t['s']])
                 sentences[sid] = {'id': sid, 'ja': info['ja'], 'en': info['en'],
-                                  't': toks, 'g': grammar_tags(info)}
+                                  't': toks, 'g': grammar_tags(info),
+                                  # N5 vocabulary in the sentence (for picking sentences
+                                  # rich in the words you're due to review)
+                                  'w': sorted(words_in[si], key=lambda i: int(i[2:]))}
             refs.append({'s': sid, 'a': [a, b], 'r': hira(r)})
         w['sentences'] = refs
         for k in [k for k in w if k.startswith('_')]:

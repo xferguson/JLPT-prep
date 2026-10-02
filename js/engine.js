@@ -58,6 +58,7 @@ export function buildCourse({ characters, words, sentences, grammar = [], kana =
         id: `z:${w.id.slice(2)}:${k}`, kind: 'cloze', wordId: w.id, sentenceId: ref.s,
         span: ref.a, answer: s.ja.slice(a, b), reading: ref.r, stages: ['cloze'],
         rank: w.rank, len: s.ja.length,
+        vocab: (s.w || []).filter((id) => id !== w.id), // other N5 words in the sentence
       };
     });
     clozes.forEach((z) => items.set(z.id, z));
@@ -163,17 +164,63 @@ export function streak(state, now = Date.now()) {
   return n;
 }
 
+// Above this many due reviews, half of new learning is sentences for due words.
+export const SENTENCE_MIX_DUE = 50;
+
+/**
+ * Candidates for new learning, before mixing.
+ *   sentences: when more than SENTENCE_MIX_DUE reviews are due, the next
+ *              sentence of each due word (most overdue first), best for what's due
+ *   normal:    the queue in order (kanji and words first), minus those sentences
+ *   mix:       whether the 50% sentence rule is on
+ * `exclude`: ids to leave out (items already being taught).
+ */
+export function newCandidates(course, state, now = Date.now(), { count = 5, exclude = new Set() } = {}) {
+  const due = dueCards(state, now).length;
+  const mix = due > SENTENCE_MIX_DUE;
+  const dueIds = dueWordIds(state, now);
+  const dueSet = new Set(dueIds);
+  const sentences = [];
+  if (mix) {
+    for (const wid of dueIds) {
+      if (sentences.length >= count) break;
+      const z = refreshSentenceSlot(course, state, wid, dueSet, now);
+      if (z && !exclude.has(z.id)) sentences.push(z);
+    }
+  }
+  const taken = new Set(sentences.map((z) => z.id));
+  const normal = [];
+  for (const id of [...state.queue]) {
+    if (normal.length >= count) break;
+    const item = course.items.get(id);
+    if (!item || state.cards[id] || taken.has(id) || exclude.has(id)) continue;
+    // a sentence taken from the queue is re-picked for what's due right now too
+    const pick = item.kind === 'cloze' ? refreshSentenceSlot(course, state, item.wordId, dueSet, now) : item;
+    if (pick && !taken.has(pick.id) && !exclude.has(pick.id)) {
+      normal.push(pick);
+      taken.add(pick.id);
+    }
+  }
+  return { sentences, normal, mix };
+}
+
 // Next items to learn. `ignoreLimit` lets the learner go past the daily cap;
-// `limit` overrides the batch size.
+// `limit` overrides the batch size. With more than SENTENCE_MIX_DUE reviews due,
+// half the batch (rounded up) is sentences for due words, alternating with the
+// normal queue; missing sentences are filled from the queue.
 export function nextNewItems(course, state, now = Date.now(), { ignoreLimit = false, limit } = {}) {
   const size = limit ?? state.settings.batchSize;
   const left = ignoreLimit ? size
     : Math.min(size, Math.max(0, state.settings.newPerDay - today(state, now).learned));
+  if (left <= 0) return [];
+  const { sentences, normal, mix } = newCandidates(course, state, now, { count: left });
+  if (!mix) return normal.slice(0, left);
+  const s = sentences.slice(0, Math.ceil(left / 2));
+  const n = normal.slice(0, left - s.length);
   const out = [];
-  for (const id of state.queue) {
-    if (out.length >= left) break;
-    const item = course.items.get(id);
-    if (item && !state.cards[id]) out.push(item);
+  while (out.length < left && (s.length || n.length)) {
+    if (s.length) out.push(s.shift());
+    if (n.length && out.length < left) out.push(n.shift());
   }
   return out;
 }
@@ -350,25 +397,65 @@ export function sentencesOf(course, wordId) {
   return [...(course.clozesByWord.get(wordId) || [])].sort((a, b) => a.len - b.len);
 }
 
-// The one sentence of a word that may be queued now: the first not-yet-learned
-// sentence, provided every earlier one has passed its first review.
-export function nextSentenceFor(course, state, wordId) {
-  for (const z of sentencesOf(course, wordId)) {
-    const card = state.cards[z.id];
-    if (!card) return z;
-    if (!card.passedFinal) return null; // the previous sentence is still being learned
+// Words due for normal review right now, most overdue first.
+export function dueWordIds(state, now = Date.now()) {
+  return dueCards(state, now).filter((c) => c.id.startsWith('w:')).map((c) => c.id);
+}
+
+// Share of a sentence's other N5 words that are due now (0 when it has none).
+export function dueShare(cloze, dueSet) {
+  if (!cloze.vocab?.length || !dueSet?.size) return 0;
+  return cloze.vocab.filter((id) => dueSet.has(id)).length / cloze.vocab.length;
+}
+
+// The one sentence of a word that may be queued now. Sentences are learned one
+// at a time: none is available while a learned one hasn't passed its first
+// review yet. Among the unlearned ones, pick the one with the highest share of
+// due words (`dueSet`); ties go to the shorter sentence.
+export function nextSentenceFor(course, state, wordId, dueSet = null) {
+  const all = sentencesOf(course, wordId);
+  if (all.some((z) => state.cards[z.id] && !state.cards[z.id].passedFinal)) return null;
+  let best = null;
+  let bestShare = -1;
+  for (const z of all) {
+    if (state.cards[z.id]) continue;
+    const share = dueShare(z, dueSet);
+    if (share > bestShare) {
+      best = z;
+      bestShare = share;
+    }
   }
-  return null;
+  return best;
 }
 
 // Queue a word's next sentence, behind all kanji and words (first come, first learned).
 export function unlockNextSentence(course, state, wordId, now = Date.now()) {
   if (!state.cards[wordId]?.passedFinal) return [];
-  const z = nextSentenceFor(course, state, wordId);
-  if (!z || state.queue.includes(z.id)) return [];
+  const z = nextSentenceFor(course, state, wordId, new Set(dueWordIds(state, now)));
+  if (!z || queuedSentenceOf(course, state, wordId)) return [];
   state.queue.push(z.id);
   state.unlocked[z.id] = now;
   return [z.id];
+}
+
+function queuedSentenceOf(course, state, wordId) {
+  return state.queue.find((id) => id.startsWith('z:') && course.items.get(id)?.wordId === wordId) || null;
+}
+
+// When a word's sentence is about to be learned, re-pick the best one for what
+// is due right now, swapping the word's queue slot in place. Returns the item.
+export function refreshSentenceSlot(course, state, wordId, dueSet, now = Date.now()) {
+  if (!state.cards[wordId]?.passedFinal) return null;
+  const best = nextSentenceFor(course, state, wordId, dueSet);
+  if (!best) return null;
+  const slot = queuedSentenceOf(course, state, wordId);
+  if (slot === best.id) return best;
+  if (slot) {
+    state.queue[state.queue.indexOf(slot)] = best.id;
+    delete state.unlocked[slot];
+  } else state.queue.push(best.id);
+  state.unlocked[best.id] = now;
+  return best;
 }
 
 function enqueueFront(state, ids, now) {
@@ -462,16 +549,18 @@ export function reconcile(course, state, now = Date.now()) {
     state.difficultSeeded = true;
   }
   unlockWords(course, state, now);
-  // one queued sentence per word at most (older versions queued them all)
-  const allowed = new Set();
-  for (const w of course.words) {
-    const z = state.cards[w.id]?.passedFinal ? nextSentenceFor(course, state, w.id) : null;
-    if (z) allowed.add(z.id);
-  }
+  // one queued sentence per word at most (older versions queued them all); the
+  // first valid one queued is kept, since it may have been picked for due words
+  const open = (wordId) => state.cards[wordId]?.passedFinal
+    && !sentencesOf(course, wordId).some((z) => state.cards[z.id] && !state.cards[z.id].passedFinal);
+  const slotted = new Set();
   state.queue = state.queue.filter((id) => {
-    if (!id.startsWith('z:') || allowed.has(id)) return true;
-    delete state.unlocked[id];
-    return false;
+    if (!id.startsWith('z:')) return true;
+    const z = course.items.get(id);
+    const keep = z && !state.cards[id] && open(z.wordId) && !slotted.has(z.wordId);
+    if (keep) slotted.add(z.wordId);
+    else delete state.unlocked[id];
+    return keep;
   });
   for (const w of course.words) unlockNextSentence(course, state, w.id, now);
   // sentences always queue behind kanji and words

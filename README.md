@@ -97,13 +97,34 @@ words unlock at once, the most frequent comes first.
 Each word has 3–5 practice sentences, shown as **cloze** cards. They unlock
 one at a time, so you never get several sentences for the same word in a row:
 
-- When a word passes its first review at its final stage, its first
-  (shortest) sentence joins the queue.
+- When a word passes its first review at its final stage, one of its
+  sentences joins the queue.
 - When that sentence passes its first review, the word's next sentence joins
   the queue, and so on.
-- Sentences always queue **behind** kanji and words, first unlocked, first
+- Sentences normally queue **behind** kanji and words, first unlocked, first
   learned. For example, with words x and y learned in that order, the queue
   gets xA, then yA, and xB only once xA has passed.
+
+**Which sentence.** A word's next sentence is the one with the highest
+share of words you're **due to review right now**. That's the due words
+divided by the other N5 words in the sentence. Ties, including when nothing
+is due, go to the shorter sentence. The choice is re-made at the moment the
+sentence is taught, so it reflects what's due then.
+
+**Sentences for due words when the pile is big.** While more than 50 reviews
+are due, half of new learning (rounded up) is sentences, in both Learn and
+Play:
+- They alternate with the normal queue, sentence first: a 5-card session is
+  sentence, word, sentence, word, sentence.
+- The sentences come from your due words in review order, most overdue
+  first. A due word with no sentence available is skipped for the next one.
+  A word has no sentence available if it hasn't passed its final form, if
+  its previous sentence hasn't passed yet, or if none are left.
+- Missing slots are filled from the normal queue.
+- At 50 due or fewer, nothing changes.
+
+Learning a sentence doesn't count as a review of its word. Typing the word in
+a sentence *review* still does.
 
 Each card shows a sentence with the word blanked out, plus the English
 translation. You answer by multiple choice or by typing. Typed romaji is

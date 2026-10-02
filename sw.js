@@ -1,6 +1,6 @@
 // Service worker: precache the app shell and the N5 data so the app works
 // offline. Bump VERSION when the list of files changes.
-const VERSION = 'v5';
+const VERSION = 'v6';
 const CACHE = `jlpt-prep-${VERSION}`;
 const ASSETS = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',

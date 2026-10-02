@@ -2,7 +2,7 @@ import {
   buildCourse, initialState, reconcile, stats, nextNewItems, completeLearning, dueCards,
   nextDueTime, review, reviewView, itemStatus, knownChars, DEFAULT_SETTINGS,
   difficultCards, markDifficult, graduateDifficult, recordDrill, recordConfusion, confusedWith, partnersOf,
-  sentencesOf,
+  sentencesOf, newCandidates,
 } from './engine.js';
 import { DrillSession, DRILL_TESTS } from './drill.js';
 import { preview, formatInterval, AGAIN, HARD, GOOD, EASY, DEFAULT_SRS } from './srs.js';
@@ -692,9 +692,14 @@ function playStep() {
   const inPlay = new Set(play.learn.items.map((i) => i.id));
   const live = play.learn.inProgress.length;
   const newLeft = play.extraNew ? Infinity : stats(course, state, now).newLeftToday - live;
-  const newItem = newLeft > 0
-    ? nextNewItems(course, state, now, { ignoreLimit: true, limit: live + 3 }).find((i) => !inPlay.has(i.id)) || null
-    : null;
+  let newItem = null;
+  if (newLeft > 0) {
+    // more than 50 due: alternate sentences for due words with the normal queue, sentence first
+    const { sentences, normal, mix } = newCandidates(course, state, now, { count: 2, exclude: inPlay });
+    const introduced = play.learn.items;
+    const sentenceTurn = introduced.filter((i) => i.kind === 'cloze').length <= introduced.filter((i) => i.kind !== 'cloze').length;
+    newItem = (mix && sentenceTurn ? sentences[0] || normal[0] : normal[0] || sentences[0]) || null;
+  }
   const step = play.next({ due: due.length, newItem, newLeft: Number.isFinite(newLeft) ? newLeft : 1e9 });
   if (step.type === 'introduce') {
     play.introduce(step.item);
@@ -1498,4 +1503,4 @@ boot().catch((err) => {
 });
 
 // for debugging from the console
-window.jlpt = { get state() { return state; }, get course() { return course; }, get drill() { return drill; } };
+window.jlpt = { get state() { return state; }, get course() { return course; }, get drill() { return drill; }, get play() { return play; } };
